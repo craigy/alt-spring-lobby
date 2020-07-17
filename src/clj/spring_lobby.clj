@@ -3,35 +3,50 @@
     [cljfx.api :as fx]))
 
 
-#_
-(fx/on-fx-thread
-  (fx/create-component
-    {:fx/type :stage
-     :showing true
-     :title "Alt Spring Lobby"
-     :width 300
-     :height 100
-     :scene {:fx/type :scene
-             :root {:fx/type :v-box
-                    :alignment :center
-                    :children [{:fx/type :label
-                                :text "Hello world"}]}}}))
+(defonce *state
+  (atom {}))
+
+(defmulti event-handler :event/type)
 
 
-(def renderer
-  (fx/create-renderer))
-
-(defn root [{:keys [showing]}]
+(defn root-view [{{:keys []} :state}]
   {:fx/type :stage
-   :showing showing
+   :showing true
+   :title "Alt Spring Lobby"
+   :width 300
+   :height 100
    :scene {:fx/type :scene
            :root {:fx/type :v-box
-                  :padding 50
-                  :children [{:fx/type :button
-                              :text "close"
-                              :on-action (fn [_]
-                                           (renderer {:fx/type root
-                                                      :showing false}))}]}}})
+                  :alignment :top-left
+                  :children [{:fx/type :menu-bar
+                              :menus
+                              [{:fx/type :menu
+                                :text "menu1"
+                                :items [{:fx/type :menu-item
+                                         :text "menu1 item1"}
+                                        {:fx/type :menu-item
+                                         :text "menu1 item2"}]}
+                               {:fx/type :menu
+                                :text "menu2"
+                                :items [{:fx/type :menu-item
+                                         :text "menu2 item1"}
+                                        {:fx/type :menu-item
+                                         :text "menu2 item2"}]}
+                               {:fx/type :menu
+                                :text "menu3"
+                                :items [{:fx/type :menu-item
+                                         :text "menu3 item1"}
+                                        {:fx/type :menu-item
+                                         :text "menu3 item2"}]}]}
+                             {:fx/type :label
+                              :text "Hello world"}]}}})
 
-(renderer {:fx/type root
-           :showing true})
+(def renderer
+  (fx/create-renderer
+    :middleware (fx/wrap-map-desc (fn [state]
+                                    {:fx/type root-view
+                                     :state state}))
+    :opts {:fx.opt/map-event-handler event-handler}))
+
+
+(fx/mount-renderer *state renderer)
