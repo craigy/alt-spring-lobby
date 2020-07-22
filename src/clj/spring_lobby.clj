@@ -1,8 +1,14 @@
 (ns spring-lobby
   (:require
     [cljfx.api :as fx]
+    [clojure.java.io :as io]
+    [clojure.string :as string]
     [spring-lobby.client :as client]
-    [taoensso.timbre :refer [info trace warn]]))
+    [taoensso.timbre :refer [info trace warn]])
+  (:import
+    (java.nio.file Files Paths StandardCopyOption)
+    (org.tukaani.xz BasicArrayCache LZMA2Options XZInputStream)))
+    
 
 
 (defonce *state
@@ -17,6 +23,32 @@
    :title "deth"
    :mod-name "Balanced Annihilation V9.79.4"
    :map-hash -1611391257})
+
+
+(defn spring-root 
+  "Returns the root directory for Spring"
+  []
+  (str (System/getProperty "user.home") "Spring") ; TODO make sure
+  "/mnt/c/Users/craig/Documents/My Games/Spring") ; TODO remove
+
+(defn map-files []
+  (->> (io/file (str (spring-root) "/maps"))
+       file-seq
+       (filter #(.isFile %))
+       (filter #(string/ends-with? (.getName %) ".sd7"))))
+
+; https://stackoverflow.com/a/49454898/984393
+(defn extract-7z [from]
+  (let [from-path (.getPath (io/file from))
+        to (subs from-path 0 (.lastIndexOf from-path "."))]
+    (info "Extracting" from "to" to)
+    (with-open [fs (io/input-stream from)
+                xz (XZInputStream. fs (BasicArrayCache/getInstance))]
+      (Files/copy xz (Paths/get to) (StandardCopyOption/REPLACE_EXISTING)))))
+
+#_
+(extract-7z (first (map-files)))
+
 
 (defn menu-view [opts]
   {:fx/type :menu-bar
