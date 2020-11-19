@@ -39,6 +39,7 @@
 (deftest parse-script
   (is (= expected-script-data
          (spring/parse-script expected-script-txt)))
+  #_
   (is (= nil
          (spring/parse-script
            (slurp "/mnt/c/Users/craig/Desktop/Dworld Acidic.smd")))))
