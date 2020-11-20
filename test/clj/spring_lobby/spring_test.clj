@@ -51,7 +51,9 @@
 (deftest script-data
   (testing "no players"
     (is (= expected-script-data
-           (spring/script-data battle))))
+           (assoc-in
+             (spring/script-data battle)
+             [:game :hostip] nil))))
   (testing "player and bot"
     (is (= expected-script-data-players
            (spring/script-data battle-players)))))
@@ -78,11 +80,37 @@
 (deftest parse-script
   #_
   (is (= expected-script-data
-         (spring/parse-script expected-script-txt)))
+         (assoc-in
+           (spring/parse-script expected-script-txt)
+           [:game :hostip] nil)))
   #_
   (is (= nil
          (spring/parse-script
-           (slurp "/mnt/c/Users/craig/Desktop/Dworld Acidic.smd")))))
+           (slurp "/mnt/c/Users/craig/Desktop/Dworld Acidic.smd"))))
+  #_
+  (is (= nil
+         (spring/parse-script
+           (slurp "/mnt/c/Users/craig/Desktop/Zeus05_A.smd"))))
+  #_
+  (is (= nil
+         (spring/parse-script
+           (slurp "/mnt/c/Users/craig/Desktop/Xelric_Draw_beta2.smd"))))
+  #_
+  (is (= {}
+         (spring/parse-script
+           (slurp "/mnt/c/Users/craig/Desktop/mars.smd"))))
+  #_
+  (is (= {}
+         (spring/parse-script
+           (slurp "/mnt/c/Users/craig/Desktop/CorePrime_revision1.smd"))))
+  #_
+  (is (= {}
+         (spring/parse-script
+           (slurp "/mnt/c/Users/craig/Desktop/Calamity_V1.smd"))))
+  #_
+  (is (= {}
+         (spring/parse-script
+           (slurp "/mnt/c/Users/craig/Desktop/hourglass.smd")))))
 
 
 (def battle
@@ -176,13 +204,10 @@
   "[game]
 {
 \tgametype = Balanced Annihilation V9.79.4;
-\thostip = 127.0.0.1;
+\thostip = ;
 \thostport = 8452;
 \tishost = 1;
 \tmapname = Dworld Acidic;
-\tnumplayers = 1;
-\tnumusers = 0;
-\tstartpostype = 2;
 }
 
 ")
