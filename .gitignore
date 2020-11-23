@@ -1,5 +1,6 @@
 /.cpcache/
 /.nrepl-port
 /*.jar
+/pom.xml
 /repl.log
 /trace.edn
