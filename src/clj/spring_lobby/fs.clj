@@ -74,6 +74,14 @@
 (wslpath (clojure.java.io/file "/mnt/c/Users/craig/.alt-spring-lobby/spring/engine/103.0"))
 
 
+(defn spring-executable []
+  (let [{:keys [os-name]} (sys-data)]
+    (if (or (string/includes? os-name "Windows")
+            (wsl?))
+      "spring.exe"
+      "spring")))
+
+
 (defn spring-root
   "Returns the root directory for Spring"
   []
