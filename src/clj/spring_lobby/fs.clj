@@ -6,7 +6,7 @@
     [com.climate.claypoole :as cp]
     [spring-lobby.fs.smf :as smf]
     [spring-lobby.lua :as lua]
-    [spring-lobby.spring :as spring]
+    [spring-lobby.spring.script :as spring-script]
     [taoensso.timbre :as log])
   (:import
     (java.awt.image BufferedImage)
@@ -286,9 +286,6 @@
              (re-find #"\s*(.*)=(.*)\s*;"))
     2))
 
-(defn parse-map-data [map-data]
-  (spring/parse-script map-data))
-
 
 (defn before-dot
   [path]
@@ -337,7 +334,7 @@
                         (filter (comp #(string/ends-with? % ".smd") string/lower-case #(.getName %)))
                         first)]
           (let [smd (when-let [map-data (slurp (.getInputStream zf smd-entry))]
-                      (parse-map-data map-data))]
+                      (spring-script/parse-script map-data))]
             {:smd (assoc smd ::source (.getName smd-entry))}))))))
 
 #_
@@ -391,7 +388,7 @@
                  (->> (.getArchiveItems simple)
                       (filter (comp #(string/ends-with? % ".smd") string/lower-case #(.getPath %)))
                       first)]
-        (let [smd (parse-map-data (slurp-7z-item smd-item))]
+        (let [smd (spring-script/parse-script (slurp-7z-item smd-item))]
           {:smd (assoc smd ::source (.getPath smd-item))})))))
 
 #_
