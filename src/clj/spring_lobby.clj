@@ -148,6 +148,11 @@
     (catch Exception e
       (log/warn e "Error loading map cache for" (str "'" map-name "'")))))
 
+(defn read-mod-data [f]
+  (if (string/ends-with? (.getName f) ".sdp")
+    (rapid/read-sdp-mod f {:modinfo-only false})
+    (fs/read-mod-file f {:modinfo-only false})))
+
 (defn add-watchers
   "Adds all *state watchers."
   [state-atom]
@@ -157,6 +162,7 @@
   (remove-watch state-atom :mods)
   (remove-watch state-atom :download)
   (remove-watch state-atom :battle-map-details)
+  (remove-watch state-atom :battle-mod-details)
   (add-watch-state-to-edn state-atom :config select-config "config.edn")
   (add-watch-state-to-edn state-atom :maps select-maps "maps.edn")
   (add-watch-state-to-edn state-atom :engines select-engines "engines.edn")
@@ -169,24 +175,47 @@
               new-battle-id (-> new-state :battle :battle-id)
               old-battle-map (-> old-state :battles (get old-battle-id) :battle-map)
               new-battle-map (-> new-state :battles (get new-battle-id) :battle-map)]
-          (if (or (not= old-battle-id new-battle-id)
-                  (not= old-battle-map new-battle-map))
-            (do
-              (log/debug "Updating battle map details for" new-battle-map
-                         "was" old-battle-map)
-              (let [map-details (safe-read-map-cache new-battle-map)]
-                (swap! *state assoc :battle-map-details map-details)))
-            (log/debug "Skipping battle map update for" new-battle-map
-                       "was" old-battle-map
-                       "details" (-> new-state :battle-map-details :map-name))))
+          (when (or (not= old-battle-id new-battle-id)
+                    (not= old-battle-map new-battle-map))
+            (log/debug "Updating battle map details for" new-battle-map
+                       "was" old-battle-map)
+            (let [map-details (safe-read-map-cache new-battle-map)]
+              (swap! *state assoc :battle-map-details map-details))))
         (catch Exception e
           (log/error e "Error in :battle-map-details state watcher")))))
-  #_
-  (hawk/watch! [{:paths [(fs/spring-root)]
-                 :handler (fn [ctx e]
-                            (log/info "Hawk event:" e)
-                            (swap! *state assoc :last-hawk-eveent e)
-                            ctx)}]))
+  (add-watch state-atom :battle-mod-details
+    (fn [_k _ref old-state new-state]
+      (try
+        (let [old-battle-id (-> old-state :battle :battle-id)
+              new-battle-id (-> new-state :battle :battle-id)
+              old-battle-mod (-> old-state :battles (get old-battle-id) :battle-modname)
+              new-battle-mod (-> new-state :battles (get new-battle-id) :battle-modname)]
+          (when (or (not= old-battle-id new-battle-id)
+                    (not= old-battle-mod new-battle-mod))
+            (log/debug "Updating battle mod details for" new-battle-mod
+                       "was" old-battle-mod)
+            (when-let [mod-details (some->> new-state
+                                            :mods
+                                            (filter (comp #{new-battle-mod} :mod-name))
+                                            first
+                                            :absolute-path
+                                            io/file
+                                            read-mod-data)]
+              (swap! *state assoc :battle-mod-details mod-details))))
+        (catch Exception e
+          (log/error e "Error in :battle-map-details state watcher"))))))
+
+(defn tasks-atom []
+  (atom (clojure.lang.PersistentQueue/EMPTY)))
+
+(defn add-hawk [tasks-atom]
+  (hawk/watch!
+    [{:paths [(fs/app-root) (fs/spring-root)]
+      :handler (fn [ctx e]
+                 (log/info "Hawk event:" e)
+                 (swap! tasks-atom conj {::task-type ::file-event
+                                         :file-event e})
+                 ctx)}]))
 
 
 (defn reconcile-engines
@@ -217,6 +246,12 @@
     {:to-add-count (count to-add)
      :to-remove-count (count to-remove)}))
 
+(def ^java.io.File mods-cache-root
+  (io/file (fs/app-root) "mods-cache"))
+
+(defn mod-cache-file [mod-name]
+  (io/file mods-cache-root (str mod-name ".edn")))
+
 (defn reconcile-mods
   "Reads mod details and updates missing mods in :mods in state."
   [state-atom]
@@ -229,28 +264,42 @@
         sdp-files (rapid/sdp-files)
         _ (log/info "Found" (count mod-files) "files and"
                     (count sdp-files) "rapid archives to scan for mods")
-        to-add-file (remove (comp known-file-paths #(.getAbsolutePath ^java.io.File %)) mod-files)
-        to-add-rapid (remove (comp known-rapid-paths #(.getAbsolutePath ^java.io.File %)) sdp-files)
+        to-add-file mod-files ;(remove (comp known-file-paths #(.getAbsolutePath ^java.io.File %)) mod-files)
+        to-add-rapid sdp-files ;(remove (comp known-rapid-paths #(.getAbsolutePath ^java.io.File %)) sdp-files)
         add-mod-fn (fn [mod-data]
-                     (swap! state-atom update :mods
-                            (fn [mods]
-                              (set (conj mods mod-data)))))
+                     (let [mod-name (spring/mod-name mod-data)
+                           cache-file (mod-cache-file mod-name)
+                           mod-data (assoc mod-data :mod-name mod-name)
+                           mod-details (select-keys mod-data [:filename :absolute-path :mod-name ::fs/source
+                                                              :git-commit-id])]
+                       (log/info "Caching" mod-name "to" cache-file)
+                       (spit cache-file (with-out-str (pprint mod-data)))
+                       (swap! state-atom update :mods
+                              (fn [mods]
+                                (-> (remove (comp #{(:absolute-path mod-details)} :absolute-path) mods)
+                                    (conj mod-details)
+                                    set)))))
         missing-files (set (remove (comp #(.exists ^java.io.File %) io/file)
                                    (concat known-file-paths known-rapid-paths)))]
+    (when-not (.exists mods-cache-root)
+      (.mkdirs mods-cache-root))
     (log/info "Found" (count to-add-file) "mod files and" (count to-add-rapid)
               "rapid files to scan for mods in" (- (u/curr-millis) before) "ms")
     (doseq [file to-add-file]
       (log/info "Reading mod from" file)
-      (let [mod-details (fs/read-mod-file file)]
+      (let [mod-details (fs/read-mod-file file {:modinfo-only true})]
         (add-mod-fn mod-details)))
     (doseq [sdp-file to-add-rapid]
       (log/info "Reading mod from" sdp-file)
-      (let [mod-details (rapid/read-sdp-mod sdp-file)]
+      (let [mod-details (rapid/read-sdp-mod sdp-file {:modinfo-only true})]
         (add-mod-fn mod-details)))
-    (log/info "Removing" (count missing-files) "mods because their files don't exist")
+    (log/info "Removing mods with no name, and" (count missing-files) "mods with missing files")
     (swap! state-atom update :mods
            (fn [mods]
-             (set (remove (comp missing-files :absolute-path) mods))))
+             (->> mods
+                  (remove (comp string/blank? :mod-name))
+                  (remove (comp missing-files :absolute-path))
+                  set)))
     {:to-add-file-count (count to-add-file)
      :to-add-rapid-count (count to-add-rapid)}))
 
@@ -276,7 +325,7 @@
       (.mkdirs maps-cache-root))
     (doseq [map-file todo]
       (log/info "Reading" map-file)
-      (let [{:keys [map-name] :as map-data} (fs/read-map-data map-file)
+      (let [{:keys [map-name] :as map-data} (fs/read-map-data map-file {:header-only true})
             map-cache-file (map-cache-file (:map-name map-data))]
         (if map-name
           (do
@@ -290,7 +339,7 @@
     (swap! state-atom update :maps
            (fn [maps]
              (->> maps
-                  (filter :map-name)
+                  (remove (comp string/blank? :map-name))
                   (remove (comp missing-filenames :filename))
                   set)))
     {:todo-count (count todo)}))
@@ -844,8 +893,7 @@
                :text " Game: "}
               (let [filter-lc (if mod-filter (string/lower-case mod-filter) "")
                     filtered-mods (->> mods
-                                       (filter :modinfo)
-                                       (map spring/mod-name)
+                                       (map :mod-name)
                                        (filter #(string/includes? (string/lower-case %) filter-lc))
                                        (sort version/version-compare))]
                 {:fx/type :combo-box
@@ -1751,18 +1799,20 @@
                                :is-bot (-> i :user :client-status :bot)
                                :id i}}}}})}}]})
 
-#_
-(defn battle-resources [])
+(defmethod event-handler ::isolation-type-change [{:fx/keys [event]}]
+  (log/info event))
+
 
 (defn battle-view
-  [{:keys [archiving battle battles battle-map-details bot-name bot-username bot-version cleaning
-           copying drag-team engines extracting git-clone http-download map-input-prefix maps
-           minimap-type mods rapid-data-by-version rapid-download users username] :as state}]
+  [{:keys [archiving battle battles battle-map-details battle-mod-details bot-name bot-username bot-version
+           cleaning
+           copying drag-team engines extracting git-clone http-download isolation-type map-input-prefix maps
+           minimap-type rapid-data-by-version rapid-download users username] :as state}]
   (let [{:keys [host-username battle-map]} (get battles (:battle-id battle))
         host-user (get users host-username)
         am-host (= username host-username)
         battle-modname (:battle-modname (get battles (:battle-id battle)))
-        mod-details (spring/mod-details mods battle-modname)
+        ;mod-details (spring/mod-details mods battle-modname)
         scripttags (:scripttags battle)
         startpostype (->> scripttags
                           :game
@@ -1781,7 +1831,7 @@
                         ; else
                         (scale-minimap-image minimap-width minimap-height (:minimap-image smf)))
         bots (concat bots
-                     (->> mod-details :luaai
+                     (->> battle-mod-details :luaai
                           (map second)
                           (map (fn [ai]
                                  {:bot-name (:name ai)
@@ -1835,6 +1885,15 @@
                :disable (string/blank? bot-name)
                :on-value-changed {:event/type ::change-bot-version}
                :items (or bot-versions [])}]}
+            {:fx/type :h-box
+             :alignment :center-left
+             :children
+             [{:fx/type :label
+               :text " Isolation: "}
+              {:fx/type :choice-box
+               :value (name (or isolation-type :engine))
+               :items (map name [:engine :shared])
+               :on-value-changed {:event/type ::isolation-type-change}}]}
             {:fx/type :pane
              :v-box/vgrow :always}
             {:fx/type :h-box
@@ -1878,7 +1937,7 @@
                        rapid-id (:id (get rapid-data-by-version battle-modname))
                        in-progress (or (-> rapid-download (get rapid-id) :running)
                                        (-> git-clone (get git-url) :status))]
-                   [{:severity (if mod-details 0 2)
+                   [{:severity (if battle-mod-details 0 2)
                      :text "download"
                      :in-progress in-progress
                      :action {:event/type ::download-mod
@@ -1887,26 +1946,26 @@
                               :git-url git-url
                               :engine-dir-filename (spring/engine-dir-filename engines engine-version)}}])
                  (if-let [mod-isolation-archive-file (spring/mod-isolation-archive-file
-                                                       mod-details engine-version)]
-                   (let [in-progress (-> archiving (get (:filename mod-details)) :status)]
+                                                       battle-mod-details engine-version)]
+                   (let [in-progress (-> archiving (get (:filename battle-mod-details)) :status)]
                      [{:severity (if (and (.exists mod-isolation-archive-file)
                                           (not in-progress))
                                    0 1)
                        :text "archive"
                        :in-progress in-progress
                        :action {:event/type ::archive-mod
-                                :mod-details mod-details
+                                :mod-details battle-mod-details
                                 :engine-version engine-version}}])
                    (when-let [mod-isolation-file (spring/mod-isolation-file
-                                                   mod-details engine-version)]
-                     (let [in-progress (-> copying (get (:mod-filename mod-details)) :status)]
+                                                   battle-mod-details engine-version)]
+                     (let [in-progress (-> copying (get (:filename battle-mod-details)) :status)]
                        [{:severity (if (and (.exists mod-isolation-file)
                                             (not in-progress))
                                      0 1)
                          :text "copy"
                          :in-progress in-progress
                          :action {:event/type ::copy-mod
-                                  :mod-details mod-details
+                                  :mod-details battle-mod-details
                                   :engine-version engine-version}}]))))}
               {:fx/type resource-sync-pane
                :h-box/margin 8
@@ -1996,7 +2055,7 @@
              :text "modoptions"}
             {:fx/type :table-view
              :column-resize-policy :constrained
-             :items (or (some->> mod-details
+             :items (or (some->> battle-mod-details
                                  :modoptions
                                  (map second)
                                  (filter :key)
@@ -2674,9 +2733,9 @@
                  (select-keys state
                    [:battles :battle :users :username :engine-version
                     :bot-username :bot-name :bot-version :maps :engines
-                    :map-input-prefix :mods :drag-team
+                    :map-input-prefix :mods :drag-team :battle-mod-details
                     :copying :archiving :cleaning :battle-map-details
-                    :minimap-type :http-download :extracting
+                    :minimap-type :http-download :extracting :isolation-type
                     :rapid-data-by-version :rapid-download :git-clone]))])
             [{:fx/type :v-box
               :alignment :center-left
@@ -3098,29 +3157,31 @@
                   :cell-factory
                   {:fx/cell-type :table-cell
                    :describe
-                   (fn [i]
-                     (let [url (str maps-index-url "/" (:url i))
-                           download (get http-download url)
-                           dest (io/file (fs/spring-root) "maps" (:filename i))]
-                       (merge
-                         {:text (str (:message download))
-                          :style {:-fx-font-family "monospace"}}
-                         (cond
-                           (.exists dest)
-                           {:graphic
-                            {:fx/type font-icon/lifecycle
-                             :icon-literal "mdi-check:16:white"}}
-                           (:running download)
-                           nil
-                           :else
-                           {:graphic
-                            {:fx/type :button
-                             :on-action {:event/type ::http-download
-                                         :url url
-                                         :dest dest}
-                             :graphic
-                             {:fx/type font-icon/lifecycle
-                              :icon-literal "mdi-download:16:white"}}}))))}}]}]}}}])))}})
+                   (fn [{:keys [filename url]}]
+                     (if filename
+                       (let [url (str maps-index-url "/" url)
+                             download (get http-download url)
+                             dest (io/file (fs/spring-root) "maps" filename)]
+                         (merge
+                           {:text (str (:message download))
+                            :style {:-fx-font-family "monospace"}}
+                           (cond
+                             (.exists dest)
+                             {:graphic
+                              {:fx/type font-icon/lifecycle
+                               :icon-literal "mdi-check:16:white"}}
+                             (:running download)
+                             nil
+                             :else
+                             {:graphic
+                              {:fx/type :button
+                               :on-action {:event/type ::http-download
+                                           :url url
+                                           :dest dest}
+                               :graphic
+                               {:fx/type font-icon/lifecycle
+                                :icon-literal "mdi-download:16:white"}}})))
+                       {:text "-"}))}}]}]}}}])))}})
 
 
 (defn -main [& _args]
