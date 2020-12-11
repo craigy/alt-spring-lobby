@@ -233,18 +233,20 @@
         to-add-rapid (remove (comp known-rapid-paths #(.getAbsolutePath ^java.io.File %)) sdp-files)
         add-mod-fn (fn [mod-data]
                      (swap! state-atom update :mods
-                           (fn [mods]
-                             (set (conj mods mod-data)))))
+                            (fn [mods]
+                              (set (conj mods mod-data)))))
         missing-files (set (remove (comp #(.exists ^java.io.File %) io/file)
                                    (concat known-file-paths known-rapid-paths)))]
     (log/info "Found" (count to-add-file) "mod files and" (count to-add-rapid)
               "rapid files to scan for mods in" (- (u/curr-millis) before) "ms")
     (doseq [file to-add-file]
       (log/info "Reading mod from" file)
-      (add-mod-fn (fs/read-mod-file file)))
+      (let [mod-details (fs/read-mod-file file)]
+        (add-mod-fn mod-details)))
     (doseq [sdp-file to-add-rapid]
       (log/info "Reading mod from" sdp-file)
-      (add-mod-fn (rapid/read-sdp-mod sdp-file)))
+      (let [mod-details (rapid/read-sdp-mod sdp-file)]
+        (add-mod-fn mod-details)))
     (log/info "Removing" (count missing-files) "mods because their files don't exist")
     (swap! state-atom update :mods
            (fn [mods]
