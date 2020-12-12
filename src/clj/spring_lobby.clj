@@ -311,9 +311,21 @@
                 (filter (comp #(.exists %) io/file :absolute-path))
                 set))))
 
+(defn remove-all-duplicate-mods
+  "Removes all copies of any mod that shares :absolute-path with another mod."
+  [state-atom]
+  (log/info "Removing duplicate mods")
+  (swap! state-atom update :mods
+         (fn [mods]
+           (let [freqs (frequencies (map :absolute-path mods))]
+             (->> mods
+                  (remove (comp pos? dec freqs :absolute-path))
+                  set)))))
+
 (defn reconcile-mods
   "Reads mod details and updates missing mods in :mods in state."
   [state-atom]
+  (remove-all-duplicate-mods state-atom)
   (let [before (u/curr-millis)
         mods (->> state-atom deref :mods)
         {:keys [rapid archive directory]} (group-by ::fs/source mods)
