@@ -365,24 +365,24 @@
                   :engine-version engine-version}))
       (= :directory (::fs/source mod-details))
       (let [source (io/file absolute-path)
-            dest (io/file (fs/app-root) "spring" "engine" engine-version "games" mod-filename)]
+            dest (io/file (fs/isolation-dir) "games" mod-filename)]
         (if (.exists source)
           (copy-missing source dest)
           (log/warn "No mod file to copy from" source "to" dest)))
       (= :rapid (::fs/source mod-details))
       (let [sdp-decoded (rapid/decode-sdp (io/file absolute-path))
             source (io/file absolute-path)
-            dest (io/file (fs/app-root) "spring" "engine" engine-version "packages" mod-filename)]
+            dest (io/file (fs/isolation-dir) "packages" mod-filename)]
         (java-nio-copy source dest)
         (doseq [item (:items sdp-decoded)]
           (let [md5 (:md5 item)
                 ^java.io.File pool-source (rapid/file-in-pool md5)
-                ^java.io.File pool-dest (rapid/file-in-pool (io/file (fs/app-root) "spring" "engine" engine-version) md5)]
+                ^java.io.File pool-dest (rapid/file-in-pool (fs/isolation-dir) md5)]
             (log/info "Copying" pool-source "to" pool-dest)
             (java-nio-copy pool-source pool-dest))))
       (= :archive (::fs/source mod-details))
       (let [source (io/file (fs/spring-root) "games" mod-filename)
-            dest (io/file (fs/app-root) "spring" "engine" engine-version "games" mod-filename)]
+            dest (io/file (fs/isolation-dir) "games" mod-filename)]
         (if (.exists source)
           (java-nio-copy source dest)
           (log/warn "No mod file to copy from" (.getAbsolutePath source)
@@ -404,7 +404,7 @@
                   :engine-version engine-version}))
       (= :rapid (::fs/source mod-details))
       (let [sdp-decoded (rapid/decode-sdp (io/file absolute-path))
-            parent (io/file (fs/app-root) "spring" "engine" engine-version "games")
+            parent (io/file (fs/isolation-dir) "games")
             ^java.io.File dest (mod-isolation-archive-file mod-details engine-version)]
         (.mkdirs parent)
         (with-open [fos (FileOutputStream. dest)
@@ -420,7 +420,7 @@
       (= :directory (::fs/source mod-details))
       (let [source-dir (io/file absolute-path)
             source-path (.toPath source-dir)
-            parent (io/file (fs/app-root) "spring" "engine" engine-version "games")
+            parent (io/file (fs/isolation-dir) "games")
             ^java.io.File dest (mod-isolation-archive-file mod-details engine-version)]
         (.mkdirs parent)
         (with-open [fos (FileOutputStream. dest)
