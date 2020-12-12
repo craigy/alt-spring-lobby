@@ -70,9 +70,13 @@
       (log/warn e "Exception loading app edn file" edn-filename))))
 
 
+(defn initial-tasks []
+  (clojure.lang.PersistentQueue/EMPTY))
+
+
 (defn initial-state []
   (merge
-    {}
+    {:tasks (initial-tasks)}
     (slurp-app-edn "config.edn")
     (slurp-app-edn "maps.edn")
     (slurp-app-edn "engines.edn")
@@ -148,10 +152,36 @@
     (catch Exception e
       (log/warn e "Error loading map cache for" (str "'" map-name "'")))))
 
-(defn read-mod-data [f]
-  (if (string/ends-with? (.getName f) ".sdp")
-    (rapid/read-sdp-mod f {:modinfo-only false})
-    (fs/read-mod-file f {:modinfo-only false})))
+(def ^java.io.File mods-cache-root
+  (io/file (fs/app-root) "mods-cache"))
+
+(defn mod-cache-file [mod-name]
+  (io/file mods-cache-root (str mod-name ".edn")))
+
+(defn read-mod-data
+  ([f]
+   (read-mod-data f nil))
+  ([f opts]
+   (if (string/ends-with? (.getName f) ".sdp")
+     (rapid/read-sdp-mod f opts)
+     (fs/read-mod-file f opts))))
+
+(defn update-mod [state-atom file]
+  (let [mod-data (read-mod-data file {:modinfo-only true})
+        mod-name (spring/mod-name mod-data)
+        cache-file (mod-cache-file mod-name)
+        mod-data (assoc mod-data :mod-name mod-name)
+        mod-details (select-keys mod-data [:filename :absolute-path :mod-name ::fs/source
+                                           :git-commit-id])]
+    (log/info "Caching" mod-name "to" cache-file)
+    (spit cache-file (with-out-str (pprint mod-data)))
+    (swap! state-atom update :mods
+           (fn [mods]
+             (-> (remove (comp #{(:absolute-path mod-details)} :absolute-path) mods)
+                 (conj mod-details)
+                 set)))
+    mod-data))
+
 
 (defn add-watchers
   "Adds all *state watchers."
@@ -205,17 +235,44 @@
         (catch Exception e
           (log/error e "Error in :battle-map-details state watcher"))))))
 
-(defn tasks-atom []
-  (atom (clojure.lang.PersistentQueue/EMPTY)))
-
-(defn add-hawk [tasks-atom]
+(defn add-hawk [state-atom]
   (hawk/watch!
-    [{:paths [(fs/app-root) (fs/spring-root)]
+    [{:paths [(io/file (fs/app-root) "spring")
+              (fs/spring-root)]
       :handler (fn [ctx e]
                  (log/info "Hawk event:" e)
-                 (swap! tasks-atom conj {::task-type ::file-event
-                                         :file-event e})
+                 (swap! state-atom update :tasks conj {::task-type ::file-event
+                                                       :file-event e})
                  ctx)}]))
+
+
+(defmulti task-handler ::task-type)
+
+(defmethod task-handler ::file-event
+  [{:keys [file-event]}]
+  (let [{:keys [file]} file-event]
+    (cond
+      ; check if possible mod
+      (or (fs/child? (io/file (fs/spring-root) "games") file)
+          (and (fs/child? (io/file (fs/spring-root) "packages") file)
+               (string/ends-with? (.getName file) ".sdp")))
+      (update-mod *state file)
+      :else
+      (log/warn "Nothing to do for" file-event))))
+
+(defmethod task-handler :default [task]
+  (log/warn "Unknown task type" task))
+
+
+; https://www.eidel.io/2019/01/22/thread-safe-queues-clojure/
+(defn handle-task! [state-atom]
+  (let [[before _after] (swap-vals! state-atom update :tasks pop)
+        task (-> before :tasks peek)]
+    (task-handler task)
+    task))
+
+(defn handle-all-tasks! [state-atom]
+  (while (handle-task! state-atom)))
 
 
 (defn reconcile-engines
@@ -246,11 +303,13 @@
     {:to-add-count (count to-add)
      :to-remove-count (count to-remove)}))
 
-(def ^java.io.File mods-cache-root
-  (io/file (fs/app-root) "mods-cache"))
-
-(defn mod-cache-file [mod-name]
-  (io/file mods-cache-root (str mod-name ".edn")))
+(defn remove-bad-mods [state-atom]
+  (swap! state-atom update :mods
+         (fn [mods]
+           (->> mods
+                (remove (comp string/blank? :mod-name))
+                (filter (comp #(.exists %) io/file :absolute-path))
+                set))))
 
 (defn reconcile-mods
   "Reads mod details and updates missing mods in :mods in state."
@@ -264,35 +323,17 @@
         sdp-files (rapid/sdp-files)
         _ (log/info "Found" (count mod-files) "files and"
                     (count sdp-files) "rapid archives to scan for mods")
-        to-add-file mod-files ;(remove (comp known-file-paths #(.getAbsolutePath ^java.io.File %)) mod-files)
-        to-add-rapid sdp-files ;(remove (comp known-rapid-paths #(.getAbsolutePath ^java.io.File %)) sdp-files)
-        add-mod-fn (fn [mod-data]
-                     (let [mod-name (spring/mod-name mod-data)
-                           cache-file (mod-cache-file mod-name)
-                           mod-data (assoc mod-data :mod-name mod-name)
-                           mod-details (select-keys mod-data [:filename :absolute-path :mod-name ::fs/source
-                                                              :git-commit-id])]
-                       (log/info "Caching" mod-name "to" cache-file)
-                       (spit cache-file (with-out-str (pprint mod-data)))
-                       (swap! state-atom update :mods
-                              (fn [mods]
-                                (-> (remove (comp #{(:absolute-path mod-details)} :absolute-path) mods)
-                                    (conj mod-details)
-                                    set)))))
+        to-add-file (remove (comp known-file-paths #(.getAbsolutePath ^java.io.File %)) mod-files)
+        to-add-rapid (remove (comp known-rapid-paths #(.getAbsolutePath ^java.io.File %)) sdp-files)
         missing-files (set (remove (comp #(.exists ^java.io.File %) io/file)
                                    (concat known-file-paths known-rapid-paths)))]
     (when-not (.exists mods-cache-root)
       (.mkdirs mods-cache-root))
     (log/info "Found" (count to-add-file) "mod files and" (count to-add-rapid)
               "rapid files to scan for mods in" (- (u/curr-millis) before) "ms")
-    (doseq [file to-add-file]
+    (doseq [file (concat to-add-file to-add-rapid)]
       (log/info "Reading mod from" file)
-      (let [mod-details (fs/read-mod-file file {:modinfo-only true})]
-        (add-mod-fn mod-details)))
-    (doseq [sdp-file to-add-rapid]
-      (log/info "Reading mod from" sdp-file)
-      (let [mod-details (rapid/read-sdp-mod sdp-file {:modinfo-only true})]
-        (add-mod-fn mod-details)))
+      (update-mod *state file))
     (log/info "Removing mods with no name, and" (count missing-files) "mods with missing files")
     (swap! state-atom update :mods
            (fn [mods]
@@ -834,40 +875,90 @@
      :alignment :center-left
      :style {:-fx-font-size 16}
      :children
-     (if battle
-       []
-       [{:fx/type :h-box
-         :alignment :center-left
-         :children
-         [{:fx/type :label
-           :text " Engine: "}
-          (let [filter-lc (if engine-filter (string/lower-case engine-filter) "")
-                filtered-engines (->> engines
-                                      (map :engine-version)
-                                      (filter #(string/includes? (string/lower-case %) filter-lc))
-                                      sort)]
-            {:fx/type :combo-box
-             :value (str engine-version)
-             :items filtered-engines
-             :disable (boolean battle)
-             :on-value-changed {:event/type ::version-change}
-             :cell-factory
-             {:fx/cell-type :list-cell
-              :describe (fn [engine] {:text (str engine)})}
-             :on-key-pressed {:event/type ::engines-key-pressed}
-             :on-hidden {:event/type ::engines-hidden}
-             :tooltip {:fx/type :tooltip
-                       :show-delay [10 :ms]
-                       :text (or engine-filter "Choose engine")}})
-          {:fx/type fx.ext.node/with-tooltip-props
+     [{:fx/type :h-box
+       :alignment :center-left
+       :children
+       [{:fx/type :label
+         :text " Engine: "}
+        (let [filter-lc (if engine-filter (string/lower-case engine-filter) "")
+              filtered-engines (->> engines
+                                    (map :engine-version)
+                                    (filter #(string/includes? (string/lower-case %) filter-lc))
+                                    sort)]
+          {:fx/type :combo-box
+           :value (str engine-version)
+           :items filtered-engines
+           :disable (boolean battle)
+           :on-value-changed {:event/type ::version-change}
+           :cell-factory
+           {:fx/cell-type :list-cell
+            :describe (fn [engine] {:text (str engine)})}
+           :on-key-pressed {:event/type ::engines-key-pressed}
+           :on-hidden {:event/type ::engines-hidden}
+           :tooltip {:fx/type :tooltip
+                     :show-delay [10 :ms]
+                     :text (or engine-filter "Choose engine")}})
+        {:fx/type fx.ext.node/with-tooltip-props
+         :props
+         {:tooltip
+          {:fx/type :tooltip
+           :show-delay [10 :ms]
+           :text "Browse and download engines with http"}}
+         :desc
+         {:fx/type :button
+          :on-action {:event/type ::show-http-downloader}
+          :graphic
+          {:fx/type font-icon/lifecycle
+           :icon-literal (str "mdi-download:16:white")}}}
+        {:fx/type fx.ext.node/with-tooltip-props
+         :props
+         {:tooltip
+          {:fx/type :tooltip
+           :show-delay [10 :ms]
+           :text "Reload engines"}}
+         :desc
+         {:fx/type :button
+          :on-action {:event/type ::reload-engines}
+          :graphic
+          {:fx/type font-icon/lifecycle
+           :icon-literal "mdi-refresh:16:white"}}}]}
+      {:fx/type :h-box
+       :alignment :center-left
+       :children
+       (concat
+         (if mods
+           [{:fx/type :label
+             :alignment :center-left
+             :text " Game: "}
+            (let [filter-lc (if mod-filter (string/lower-case mod-filter) "")
+                  filtered-mods (->> mods
+                                     (map :mod-name)
+                                     (filter #(string/includes? (string/lower-case %) filter-lc))
+                                     (sort version/version-compare))]
+              {:fx/type :combo-box
+               :value (str mod-name)
+               :items filtered-mods
+               :disable (boolean battle)
+               :on-value-changed {:event/type ::mod-change}
+               :cell-factory
+               {:fx/cell-type :list-cell
+                :describe (fn [mod-name] {:text (str mod-name)})}
+               :on-key-pressed {:event/type ::mods-key-pressed}
+               :on-hidden {:event/type ::mods-hidden}
+               :tooltip {:fx/type :tooltip
+                         :show-delay [10 :ms]
+                         :text (or mod-filter "Choose game")}})]
+           [{:fx/type :label
+             :text "Loading games..."}])
+         [{:fx/type fx.ext.node/with-tooltip-props
            :props
            {:tooltip
             {:fx/type :tooltip
              :show-delay [10 :ms]
-             :text "Browse and download engines with http"}}
+             :text "Browse and download more with Rapid"}}
            :desc
            {:fx/type :button
-            :on-action {:event/type ::show-http-downloader}
+            :on-action {:event/type ::show-rapid-downloader}
             :graphic
             {:fx/type font-icon/lifecycle
              :icon-literal (str "mdi-download:16:white")}}}
@@ -876,74 +967,22 @@
            {:tooltip
             {:fx/type :tooltip
              :show-delay [10 :ms]
-             :text "Reload engines"}}
+             :text "Reload games"}}
            :desc
            {:fx/type :button
-            :on-action {:event/type ::reload-engines}
+            :on-action {:event/type ::reload-mods}
             :graphic
             {:fx/type font-icon/lifecycle
-             :icon-literal "mdi-refresh:16:white"}}}]}
-        {:fx/type :h-box
-         :alignment :center-left
-         :children
-         (concat
-           (if mods
-             [{:fx/type :label
-               :alignment :center-left
-               :text " Game: "}
-              (let [filter-lc (if mod-filter (string/lower-case mod-filter) "")
-                    filtered-mods (->> mods
-                                       (map :mod-name)
-                                       (filter #(string/includes? (string/lower-case %) filter-lc))
-                                       (sort version/version-compare))]
-                {:fx/type :combo-box
-                 :value (str mod-name)
-                 :items filtered-mods
-                 :disable (boolean battle)
-                 :on-value-changed {:event/type ::mod-change}
-                 :cell-factory
-                 {:fx/cell-type :list-cell
-                  :describe (fn [mod-name] {:text (str mod-name)})}
-                 :on-key-pressed {:event/type ::mods-key-pressed}
-                 :on-hidden {:event/type ::mods-hidden}
-                 :tooltip {:fx/type :tooltip
-                           :show-delay [10 :ms]
-                           :text (or mod-filter "Choose game")}})]
-             [{:fx/type :label
-               :text "Loading games..."}])
-           [{:fx/type fx.ext.node/with-tooltip-props
-             :props
-             {:tooltip
-              {:fx/type :tooltip
-               :show-delay [10 :ms]
-               :text "Browse and download more with Rapid"}}
-             :desc
-             {:fx/type :button
-              :on-action {:event/type ::show-rapid-downloader}
-              :graphic
-              {:fx/type font-icon/lifecycle
-               :icon-literal (str "mdi-download:16:white")}}}
-            {:fx/type fx.ext.node/with-tooltip-props
-             :props
-             {:tooltip
-              {:fx/type :tooltip
-               :show-delay [10 :ms]
-               :text "Reload games"}}
-             :desc
-             {:fx/type :button
-              :on-action {:event/type ::reload-mods}
-              :graphic
-              {:fx/type font-icon/lifecycle
-               :icon-literal "mdi-refresh:16:white"}}}])}
-        {:fx/type :label
-         :alignment :center-left
-         :text " Map: "}
-        {:fx/type map-list
-         :disable (boolean battle)
-         :map-name map-name
-         :maps maps
-         :map-input-prefix map-input-prefix
-         :on-value-changed {:event/type ::map-change}}])}
+             :icon-literal "mdi-refresh:16:white"}}}])}
+      {:fx/type :label
+       :alignment :center-left
+       :text " Map: "}
+      {:fx/type map-list
+       :disable (boolean battle)
+       :map-name map-name
+       :maps maps
+       :map-input-prefix map-input-prefix
+       :on-value-changed {:event/type ::map-change}}]}
     {:fx/type :h-box
      :style {:-fx-font-size 16}
      :alignment :center-left
@@ -1977,7 +2016,9 @@
                        in-progress (:running download)
                        text (or (when in-progress (:message download))
                                 "download")]
-                   [{:severity (if (.exists engine-archive-file) 0 2)
+                   [{:severity (if (or engine-dir-filename
+                                       (.exists engine-archive-file))
+                                 0 2)
                      :text text
                      :in-progress in-progress
                      :action {:event/type ::http-download
@@ -2601,7 +2642,7 @@
 
 (defn root-view
   [{{:keys [users battles
-            engine-version last-failed-message
+            engine-version last-failed-message tasks
             standalone
             rapid-repo rapid-download sdp-files-cached rapid-repos-cached engines rapid-versions-by-hash
             rapid-versions-cached
@@ -2737,12 +2778,16 @@
                     :copying :archiving :cleaning :battle-map-details
                     :minimap-type :http-download :extracting :isolation-type
                     :rapid-data-by-version :rapid-download :git-clone]))])
-            [{:fx/type :v-box
+            [{:fx/type :h-box
               :alignment :center-left
               :children
               [{:fx/type :label
                 :text (str last-failed-message)
-                :style {:-fx-text-fill "#FF0000"}}]}])}}}]
+                :style {:-fx-text-fill "#FF0000"}}
+               {:fx/type :pane
+                :h-box/hgrow :always}
+               {:fx/type :label
+                :text (str (count tasks) " tasks")}]}])}}}]
       (when pop-out-battle
         [{:fx/type :stage
           :showing pop-out-battle

@@ -108,6 +108,24 @@
   (executable "spring"))
 
 
+(defn bar-root
+  "Returns the root directory for BAR"
+  ^java.io.File []
+  (let [{:keys [os-name os-version user-name user-home] :as sys-data} (sys-data)]
+    (cond
+      (string/includes? os-name "Linux")
+      (if (string/includes? os-version "Microsoft") ; WSL
+        (io/file "/mnt" "c" "Users" user-name "AppData" "Local" "Programs" "Beyond-All-Reason" "data")
+        (let [snap-dir (io/file user-home "snap" "springlobby-nsg" "common" ".spring")]
+          (if (.exists snap-dir)
+            snap-dir
+            (io/file user-home ".spring"))))
+      (string/includes? os-name "Windows")
+      (io/file user-home "AppData" "Local" "Programs" "Beyond-All-Reason" "data")
+      :else
+      (throw (ex-info "Unable to determine Spring root for this system"
+                      {:sys-data sys-data})))))
+
 (defn spring-root
   "Returns the root directory for Spring"
   ^java.io.File []
@@ -377,7 +395,7 @@
      (string/ends-with? (.getName file) ".sdz")
      (read-mod-zip-file file opts)
      :else
-     (log/warn "Uknown mod file type" file))))
+     (log/warn "Unknown mod file type" file))))
 
 (defn map-names []
   (->> (.listFiles (io/file (spring-root) "maps"))
@@ -610,3 +628,20 @@
 
 (defn map-minimap [map-name]
   (io/file (springlobby-root) "cache" (str map-name ".minimap.png")))
+
+
+; https://stackoverflow.com/a/25267111/984393
+(defn descendant?
+  "Returns true if f is a possible descendant of dir."
+  [dir f]
+  (string/starts-with?
+    (.getCanonicalPath f)
+    (.getCanonicalPath dir)))
+
+(defn child?
+  "Returns true if f is a possible descendant of dir."
+  [dir f]
+  (and dir f
+       (= (.getCanonicalPath dir)
+          (when-let [parent (.getParentFile dir)]
+            (.getCanonicalPath parent)))))
