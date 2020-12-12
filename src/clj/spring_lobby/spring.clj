@@ -33,6 +33,10 @@
   {0 "ARM"
    1 "CORE"})
 
+(def sides
+  {0 "Armada"
+   1 "Cortex"})
+
 (def map-multiplier
   "Multiplier from positions in map file into positions that Spring uses."
   8.0)
