@@ -945,6 +945,7 @@
             (let [filter-lc (if mod-filter (string/lower-case mod-filter) "")
                   filtered-mods (->> mods
                                      (map :mod-name)
+                                     (filter string?)
                                      (filter #(string/includes? (string/lower-case %) filter-lc))
                                      (sort version/version-compare))]
               {:fx/type :combo-box
