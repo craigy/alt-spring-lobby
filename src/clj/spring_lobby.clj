@@ -1620,6 +1620,30 @@
   [e]
   (n-teams e 4))
 
+(defmethod event-handler ::battle-teams-humans-vs-bots
+  [{:keys [battle users username]}]
+  (let [players (mapv
+                  (fn [[k v]] (assoc v :username k :user (get users k)))
+                  (:users battle))
+        bots (mapv
+               (fn [[k v]]
+                 (assoc v
+                        :bot-name k
+                        :user {:client-status {:bot true}}))
+               (:bots battle))]
+    (doall
+      (map-indexed
+        (fn [i player]
+          (let [is-me (= username (:username player))]
+            (apply-battle-status-changes player {:is-me is-me :is-bot false} {:id i :ally 0})))
+        players))
+    (doall
+      (map-indexed
+        (fn [b bot]
+          (let [i (+ (count players) b)]
+            (apply-battle-status-changes bot {:is-me false :is-bot true} {:id i :ally 1})))
+        bots))))
+
 
 (defn spring-color
   "Returns the spring bgr int color format from a javafx color."
@@ -2360,6 +2384,12 @@
               {:fx/type :button
                :text "4 teams"
                :on-action {:event/type ::battle-teams-4
+                           :battle battle
+                           :users users
+                           :username username}}
+              {:fx/type :button
+               :text "Humans vs bots"
+               :on-action {:event/type ::battle-teams-humans-vs-bots
                            :battle battle
                            :users users
                            :username username}}]))}]}]}))
