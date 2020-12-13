@@ -2,6 +2,7 @@
   (:require
     [clj-http.client :as http]
     [clojure.core.memoize :as mem]
+    [clojure.java.io :as io]
     [clojure.string :as string]
     [clojure.xml :as xml]
     [crouton.html :as html]
@@ -227,3 +228,7 @@
   [engine-version]
   (or (springlauncher-engine-url engine-version)
       (springrts-engine-url engine-version)))
+
+(defn engine-download-file [engine-version]
+  (when engine-version
+    (io/file (fs/download-dir) "engine" (engine-archive engine-version))))
