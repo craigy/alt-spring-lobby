@@ -2,12 +2,15 @@
   (:require
     [cemerick.pomegranate :as pomegranate]
     [cemerick.pomegranate.aether :refer [maven-central]]
+    [chime.core :as chime]
     [cljfx.api :as fx]
     [clojure.datafy :refer [datafy]]
     [clojure.java.io :as io]
     [clojure.pprint :refer [pprint]]
+    [clojure.string :as string]
     [clojure.tools.namespace.repl :refer [disable-unload! disable-reload! refresh]]
     [hawk.core :as hawk]
+    java-time
     [pjstadig.humane-test-output]))
 
 
@@ -82,6 +85,39 @@
   (let [actual-handler (var-get (find-var 'spring-lobby/event-handler))]
     (actual-handler e)))
 
+(defn handle-task []
+  (require 'spring-lobby)
+  (let [actual-handler (var-get (find-var 'spring-lobby/handle-task!))]
+    (actual-handler *state)))
+
+(defn handle-file-event []
+  (require 'spring-lobby)
+  (let [actual-handler (var-get (find-var 'spring-lobby/handle-all-file-events!))]
+    (actual-handler *state)))
+
+
+(defn tasks-chimer []
+  (chime/chime-at
+    (chime/periodic-seq
+      (java-time/instant)
+      (java-time/duration 1 :seconds))
+    (fn [_chimestamp]
+      (handle-task))
+    {:error-handler
+     (fn [e]
+       (println "task handler error" e))}))
+
+(defn file-events-chimer []
+  (chime/chime-at
+    (chime/periodic-seq
+      (java-time/instant)
+      (java-time/duration 1 :seconds))
+    (fn [_chimestamp]
+      (handle-file-event))
+    {:error-handler
+     (fn [e]
+       (println "file event handler error" e))}))
+
 
 (defn init []
   (try
@@ -92,6 +128,7 @@
     (alter-var-root #'*state (constantly (var-get (find-var 'spring-lobby/*state))))
     ; just use spring-lobby/*state for initial state, on refresh copy user/*state var back
     (let [watch-fn (var-get (find-var 'spring-lobby/add-watchers))
+          hawk-fn (var-get (find-var 'spring-lobby/add-hawk))
           r (fx/create-renderer
               :middleware (fx/wrap-map-desc
                             (fn [state]
@@ -99,14 +136,17 @@
                                :state state}))
               :opts {:fx.opt/map-event-handler event-handler})]
       (watch-fn *state)
+      (hawk-fn *state)
       (alter-var-root #'renderer (constantly r)))
+    (file-events-chimer)
+    (tasks-chimer)
     (fx/mount-renderer *state renderer)
     (catch Exception e
       (println e))))
 
 
-(defn add-dependency [coordinate]
+(defn add-dependencies [coordinates]
   (pomegranate/add-dependencies
-    :coordinates `[~coordinate]
+    :coordinates coordinates
     :repositories (merge maven-central
                          {"clojars" "https://clojars.org/repo"})))

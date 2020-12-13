@@ -16,6 +16,7 @@
     [crouton.html :as html]
     [hawk.core :as hawk]
     [me.raynes.fs :as raynes-fs]
+    [shams.priority-queue :as pq]
     [spring-lobby.battle :as battle]
     [spring-lobby.client :as client]
     [spring-lobby.client.message :as message]
@@ -71,17 +72,21 @@
 
 
 (defn initial-tasks []
+  (pq/priority-queue (constantly 1) :variant :set))
+
+(defn initial-file-events []
   (clojure.lang.PersistentQueue/EMPTY))
 
 
 (defn initial-state []
   (merge
-    {:tasks (initial-tasks)}
     (slurp-app-edn "config.edn")
     (slurp-app-edn "maps.edn")
     (slurp-app-edn "engines.edn")
     (slurp-app-edn "mods.edn")
-    (slurp-app-edn "download.edn")))
+    (slurp-app-edn "download.edn")
+    {:file-events (initial-file-events)
+     :tasks (initial-tasks)}))
 
 
 (def ^:dynamic *state
@@ -162,19 +167,30 @@
   ([f]
    (read-mod-data f nil))
   ([f opts]
-   (if (string/ends-with? (.getName f) ".sdp")
-     (rapid/read-sdp-mod f opts)
-     (fs/read-mod-file f opts))))
+   (let [mod-data
+         (if (string/ends-with? (.getName f) ".sdp")
+           (rapid/read-sdp-mod f opts)
+           (fs/read-mod-file f opts))
+         mod-name (spring/mod-name mod-data)]
+     (assoc mod-data :mod-name mod-name))))
 
 (defn update-mod [state-atom file]
   (let [mod-data (read-mod-data file {:modinfo-only true})
-        mod-name (spring/mod-name mod-data)
+        mod-name (:mod-name mod-data)
         cache-file (mod-cache-file mod-name)
-        mod-data (assoc mod-data :mod-name mod-name)
         mod-details (select-keys mod-data [:filename :absolute-path :mod-name ::fs/source
                                            :git-commit-id])]
     (log/info "Caching" mod-name "to" cache-file)
     (spit cache-file (with-out-str (pprint mod-data)))
+    (let [state @state-atom
+          battle-id (-> state :battle :battle-id)
+          battle-modname (-> state :battles (get battle-id) :battle-modname)
+          battle-mod-details (:battle-mod-details state)]
+      (when (or (= (:absolute-path mod-data) (:absolute-path battle-mod-details))
+                (= (:mod-name mod-details) battle-modname)) ; can this ever happen?
+        (when-let [battle-mod-data (read-mod-data file)]
+          (log/info "Updating battle mod details")
+          (swap! state-atom assoc :battle-mod-details battle-mod-data)))) ; TODO avoid dupe swap
     (swap! state-atom update :mods
            (fn [mods]
              (-> (remove (comp #{(:absolute-path mod-details)} :absolute-path) mods)
@@ -241,24 +257,15 @@
               (fs/spring-root)]
       :handler (fn [ctx e]
                  (log/info "Hawk event:" e)
-                 (swap! state-atom update :tasks conj {::task-type ::file-event
-                                                       :file-event e})
+                 (swap! state-atom update :file-events conj e)
                  ctx)}]))
 
 
 (defmulti task-handler ::task-type)
 
-(defmethod task-handler ::file-event
-  [{:keys [file-event]}]
-  (let [{:keys [file]} file-event]
-    (cond
-      ; check if possible mod
-      (or (fs/child? (io/file (fs/spring-root) "games") file)
-          (and (fs/child? (io/file (fs/spring-root) "packages") file)
-               (string/ends-with? (.getName file) ".sdp")))
-      (update-mod *state file)
-      :else
-      (log/warn "Nothing to do for" file-event))))
+(defmethod task-handler ::update-mod
+  [{:keys [file]}]
+  (update-mod *state file))
 
 (defmethod task-handler :default [task]
   (log/warn "Unknown task type" task))
@@ -266,13 +273,60 @@
 
 ; https://www.eidel.io/2019/01/22/thread-safe-queues-clojure/
 (defn handle-task! [state-atom]
-  (let [[before _after] (swap-vals! state-atom update :tasks pop)
-        task (-> before :tasks peek)]
+  (let [[before _after] (swap-vals! state-atom update :tasks
+                                    (fn [tasks]
+                                      (if-not (empty? tasks)
+                                        (pop tasks)
+                                        tasks)))
+        tasks (:tasks before)
+        task (when-not (empty? tasks)
+               (peek tasks))]
     (task-handler task)
     task))
 
 (defn handle-all-tasks! [state-atom]
   (while (handle-task! state-atom)))
+
+
+(defn add-task! [state-atom task]
+  (if task
+    (do
+      (log/info "Adding task" (pr-str task))
+      (swap! state-atom update :tasks conj task))
+    (log/warn "Attempt to add nil task" task)))
+
+
+; https://www.eidel.io/2019/01/22/thread-safe-queues-clojure/
+(defn handle-file-event! [state-atom]
+  (let [[before _after] (swap-vals! state-atom update :file-events pop)
+        file-event (-> before :file-events peek)
+        {:keys [file]} file-event
+        ;root (io/file (fs/spring-root) "games") ; TODO check spring and BAR dirs...
+        ;root (io/file (fs/bar-root) "games") ; TODO check spring and BAR dirs...
+        root (fs/isolation-dir)
+        games (io/file root "games")]
+    (when file
+      (cond
+        ; update possible mod file
+        (or (fs/child? games file)
+            (and (fs/child? (io/file root "packages") file)
+                 (string/ends-with? (.getName file) ".sdp")))
+        (add-task! state-atom {::task-type ::update-mod
+                               :file file})
+        ; or mod in directory / git format
+        (fs/descendant? games file)
+        (loop [parent file] ; find directory in games
+          (when parent
+            (if (fs/child? games parent)
+              (add-task! state-atom {::task-type ::update-mod
+                                     :file parent})
+              (recur (.getParentFile parent)))))
+        :else
+        (log/warn "Nothing to do for" file-event)))
+    file-event))
+
+(defn handle-all-file-events! [state-atom]
+  (while (handle-file-event! state-atom)))
 
 
 (defn reconcile-engines
@@ -1414,17 +1468,19 @@
           (swap! *state assoc-in [:copying mod-filename] {:status false}))))))
 
 (defmethod event-handler ::git-mod
-  [{:keys [mod-details]}]
-  (let [{:keys [absolute-path git-commit-id]} mod-details]
-    (when (and absolute-path git-commit-id)
-      (log/info "Checking out mod" absolute-path "to" git-commit-id)
+  [{:keys [battle-modname mod-details]}]
+  (let [{:keys [absolute-path]} mod-details
+        short-battle-commit-id (last (clojure.string/split battle-modname #"\s"))]
+    (when (and absolute-path short-battle-commit-id)
+      (log/info "Checking out mod" absolute-path "to" short-battle-commit-id)
       (swap! *state assoc-in [:gitting absolute-path] {:status true})
       (future
         (try
-          (git/reset-hard (io/file absolute-path) git-commit-id)
+          (git/fetch (io/file absolute-path))
+          (git/reset-hard (io/file absolute-path) short-battle-commit-id)
           (reconcile-mods *state)
           (catch Exception e
-            (log/error e "Error during git reset" absolute-path "to" git-commit-id))
+            (log/error e "Error during git reset" absolute-path "to" short-battle-commit-id))
           (finally
             (swap! *state assoc-in [:gitting absolute-path] {:status false})))))))
 
@@ -2129,15 +2185,16 @@
                          :action {:event/type ::copy-mod
                                   :mod-details battle-mod-details
                                   :engine-version engine-version}}])
-                     (when (and (.exists mod-isolation-file)
-                                (= :directory (::fs/source battle-mod-details)))
-                       [{:severity (if (= (git/latest-id mod-isolation-file)
-                                          (:git-commit-id battle-mod-details))
+                     (when (and (= :directory
+                                   (::fs/source battle-mod-details)))
+                       [{:severity (if (= battle-modname
+                                          (:mod-name battle-mod-details))
                                      0 1)
                          :text "git"
                          :in-progress false
                          :action {:event/type ::git-mod
-                                  :mod-details battle-mod-details}}]))))}
+                                  :mod-details battle-mod-details
+                                  :battle-modname battle-modname}}]))))}
               {:fx/type resource-sync-pane
                :h-box/margin 8
                :resource "engine" ; engine-version ; (str "engine (" engine-version ")")
@@ -2773,7 +2830,6 @@
 
 (defmethod event-handler ::extract-7z
   [{:keys [file dest]}]
-  #p file #p dest
   (future
     (try
       (swap! *state assoc-in [:extracting file] true)
@@ -2789,7 +2845,7 @@
 
 (defn root-view
   [{{:keys [users battles
-            engine-version last-failed-message tasks
+            engine-version last-failed-message tasks file-events
             standalone
             rapid-repo rapid-download sdp-files-cached rapid-repos-cached engines rapid-versions-by-hash
             rapid-versions-cached
@@ -2934,6 +2990,8 @@
                 :style {:-fx-text-fill "#FF0000"}}
                {:fx/type :pane
                 :h-box/hgrow :always}
+               {:fx/type :label
+                :text (str (count file-events) " file events  ")}
                {:fx/type :label
                 :text (str (count tasks) " tasks")}]}])}}}]
       (when pop-out-battle
