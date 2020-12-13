@@ -1347,21 +1347,23 @@
      (concat
        [{:fx/type :h-box
          :children
-         [{:fx/type :label
-           :h-box/margin 4
-           :text (str resource
-                      (if (zero? worst-severity) " is synced" " issues:"))
-           :style {:-fx-font-size 16}}
-          {:fx/type :button
-           :on-action delete-action
-           :h-box/margin 4
-           :style
-           {:-fx-base "black"
-            :-fx-background "black"
-            :-fx-background-color "black"}
-           :graphic
-           {:fx/type font-icon/lifecycle
-            :icon-literal "mdi-delete:16:white"}}]}]
+         (concat
+           [{:fx/type :label
+             :h-box/margin 4
+             :text (str resource
+                        (if (zero? worst-severity) " is synced" " issues:"))
+             :style {:-fx-font-size 16}}]
+           (when delete-action
+             [{:fx/type :button
+               :on-action delete-action
+               :h-box/margin 4
+               :style
+               {:-fx-base "black"
+                :-fx-background "black"
+                :-fx-background-color "black"}
+               :graphic
+               {:fx/type font-icon/lifecycle
+                :icon-literal "mdi-delete:16:white"}}]))}]
        (map
          (fn [{:keys [text action severity in-progress]}]
            (let [font-style {:-fx-font-size 12}]
@@ -2059,7 +2061,7 @@
              [{:fx/type resource-sync-pane
                :h-box/margin 8
                :resource "map" ;battle-map ; (str "map (" battle-map ")")
-               :delete-action {:event/type ::delete-map}
+               ;:delete-action {:event/type ::delete-map}
                :issues
                (concat
                  (let [url (http/map-url battle-map)
@@ -2086,7 +2088,7 @@
               {:fx/type resource-sync-pane
                :h-box/margin 8
                :resource "game" ;battle-modname ; (str "game (" battle-modname ")")
-               :delete-action {:event/type ::delete-mod}
+               ;:delete-action {:event/type ::delete-mod}
                :issues
                (concat
                  (let [git-url (cond
