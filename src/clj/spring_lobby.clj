@@ -1411,6 +1411,21 @@
         (finally
           (swap! *state assoc-in [:copying mod-filename] {:status false}))))))
 
+(defmethod event-handler ::git-mod
+  [{:keys [mod-details]}]
+  (let [{:keys [absolute-path git-commit-id]} mod-details]
+    (when (and absolute-path git-commit-id)
+      (log/info "Checking out mod" absolute-path "to" git-commit-id)
+      (swap! *state assoc-in [:gitting absolute-path] {:status true})
+      (future
+        (try
+          (git/reset-hard (io/file absolute-path) git-commit-id)
+          (reconcile-mods *state)
+          (catch Exception e
+            (log/error e "Error during git reset" absolute-path "to" git-commit-id))
+          (finally
+            (swap! *state assoc-in [:gitting absolute-path] {:status false})))))))
+
 (defmethod event-handler ::archive-mod
   [{:keys [mod-details engine-version]}]
   (let [mod-filename (:filename mod-details)]
@@ -2111,7 +2126,16 @@
                          :in-progress in-progress
                          :action {:event/type ::copy-mod
                                   :mod-details battle-mod-details
-                                  :engine-version engine-version}}]))))}
+                                  :engine-version engine-version}}])
+                     (when (and (.exists mod-isolation-file)
+                                (= :directory (::fs/source battle-mod-details)))
+                       [{:severity (if (= (git/latest-id mod-isolation-file)
+                                          (:git-commit-id battle-mod-details))
+                                     0 1)
+                         :text "git"
+                         :in-progress false
+                         :action {:event/type ::git-mod
+                                  :mod-details battle-mod-details}}]))))}
               {:fx/type resource-sync-pane
                :h-box/margin 8
                :resource "engine" ; engine-version ; (str "engine (" engine-version ")")
