@@ -2029,7 +2029,7 @@
                :on-action {:event/type ::nuke-data-dir}
                :graphic
                {:fx/type font-icon/lifecycle
-                :icon-literal "mdi-nuke:16:white"}}]}
+                :icon-literal "mdi-nuke:32:white"}}]}
             {:fx/type :h-box
              :children
              [{:fx/type resource-sync-pane
@@ -2701,6 +2701,8 @@
   (log/info "Request to download" url "to" dest)
   (future
     (try
+      (let [parent (.getParentFile dest)]
+        (.mkdirs parent))
       (clj-http/with-middleware
         (-> clj-http/default-middleware
             (insert-after clj-http/wrap-url wrap-downloaded-bytes-counter)
@@ -2768,38 +2770,39 @@
                    (try
                      (reconcile-engines *state)
                      (catch Exception e
-                       (log/error e "Error reconciling engines"))))
-                 (future
+                       (log/error e "Error reconciling engines")))
                    (try
                      (reconcile-mods *state)
                      (catch Exception e
-                       (log/error e "Error reconciling mods"))))
-                 (future
+                       (log/error e "Error reconciling mods")))
                    (try
                      (reconcile-maps *state)
                      (catch Exception e
                        (log/error e "Error reconciling maps"))))
-                 (future
-                   (try
-                     (swap! *state assoc :sdp-files-cached (doall (rapid/sdp-files)))
-                     (catch Exception e
-                       (log/error e "Error loading SDP files"))))
-                 (future
-                   (try
-                     (let [rapid-repos (sort (rapid/repos))]
-                       (swap! *state assoc :rapid-repos-cached rapid-repos)
-                       (swap! *state assoc :rapid-versions-by-hash
-                              (->> rapid-repos
-                                   (mapcat rapid/versions)
-                                   (map (juxt :hash identity))
-                                   (into {})))
-                       (swap! *state assoc :rapid-data-by-version
-                              (->> rapid-repos
-                                   (mapcat rapid/versions)
-                                   (map (juxt :version identity))
-                                   (into {}))))
-                     (catch Exception e
-                       (log/error e "Error loading rapid versions by hash"))))
+                 (swap! *state assoc :sdp-files-cached
+                   (delay
+                     (try
+                       (doall (rapid/sdp-files))
+                       (catch Exception e
+                         (log/error e "Error loading SDP files")))))
+                 (swap! *state assoc :rapid-cache
+                   (delay
+                     (try
+                       (let [rapid-repos (sort (rapid/repos))]
+                         {:rapid-repos-cached rapid-repos
+                          :rapid-versions-by-hash
+                          (->> rapid-repos
+                               (mapcat rapid/versions)
+                               (map (juxt :hash identity))
+                               (into {}))
+                          :rapid-data-by-version
+                          (->> rapid-repos
+                               (mapcat rapid/versions)
+                               (map (juxt :version identity))
+                               (into {}))})
+                       (catch Exception e
+                         (log/error e "Error loading rapid versions by hash")))))
+                 #_
                  (future
                    (try
                      (when-let [rapid-repo (:rapid-repo @*state)]
