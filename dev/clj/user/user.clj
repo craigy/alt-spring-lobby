@@ -33,6 +33,9 @@
 ; renderer var, create in init
 
 (def ^:dynamic renderer nil)
+(def ^:dynamic hawk nil)
+(def ^:dynamic tasks-chimer nil)
+(def ^:dynamic file-events-chimer nil)
 
 
 (defn rerender []
@@ -42,10 +45,44 @@
     (alter-var-root (find-var 'spring-lobby/*state) (constantly *state))
     (let [watch-fn (var-get (find-var 'spring-lobby/add-watchers))]
       (watch-fn *state))
+    (when hawk
+      (try
+        (hawk/stop! hawk)
+        (catch Exception e
+          (println "error stopping hawk" e))))
+    (when tasks-chimer
+      (try
+        (tasks-chimer)
+        (catch Exception e
+          (println "error stopping tasks" e))))
+    (when file-events-chimer
+      (try
+        (file-events-chimer)
+        (catch Exception e
+          (println "error stopping file events" e))))
+    (alter-var-root (find-var 'spring-lobby/*state) (constantly *state))
+    (try
+      (let [hawk-fn (var-get (find-var 'spring-lobby/add-hawk))]
+        (alter-var-root #'hawk (fn [& _] (hawk-fn *state))))
+      (catch Exception e
+        (println "error starting hawk" e)))
+    (try
+      (let [chimer-fn (var-get (find-var 'spring-lobby/tasks-chimer-fn))]
+        (alter-var-root #'tasks-chimer (fn [& _] (chimer-fn *state))))
+      (catch Exception e
+        (println "error starting tasks" e)))
+    (try
+      (let [chimer-fn (var-get (find-var 'spring-lobby/file-events-chimer-fn))]
+        (alter-var-root #'file-events-chimer (fn [& _] (chimer-fn *state))))
+      (catch Exception e
+        (println "error starting file events" e)))
     (if renderer
       (do
         (println "Re-rendering")
-        (renderer))
+        (try
+          (renderer)
+          (catch Exception e
+            (println "error rendering" e))))
       (println "No renderer"))
     (catch Exception e
       (println e))))
@@ -85,39 +122,6 @@
   (let [actual-handler (var-get (find-var 'spring-lobby/event-handler))]
     (actual-handler e)))
 
-(defn handle-task []
-  (require 'spring-lobby)
-  (let [actual-handler (var-get (find-var 'spring-lobby/handle-task!))]
-    (actual-handler *state)))
-
-(defn handle-file-event []
-  (require 'spring-lobby)
-  (let [actual-handler (var-get (find-var 'spring-lobby/handle-all-file-events!))]
-    (actual-handler *state)))
-
-
-(defn tasks-chimer []
-  (chime/chime-at
-    (chime/periodic-seq
-      (java-time/instant)
-      (java-time/duration 1 :seconds))
-    (fn [_chimestamp]
-      (handle-task))
-    {:error-handler
-     (fn [e]
-       (println "task handler error" e))}))
-
-(defn file-events-chimer []
-  (chime/chime-at
-    (chime/periodic-seq
-      (java-time/instant)
-      (java-time/duration 1 :seconds))
-    (fn [_chimestamp]
-      (handle-file-event))
-    {:error-handler
-     (fn [e]
-       (println "file event handler error" e))}))
-
 
 (defn init []
   (try
@@ -129,6 +133,8 @@
     ; just use spring-lobby/*state for initial state, on refresh copy user/*state var back
     (let [watch-fn (var-get (find-var 'spring-lobby/add-watchers))
           hawk-fn (var-get (find-var 'spring-lobby/add-hawk))
+          tasks-chimer-fn (var-get (find-var 'spring-lobby/tasks-chimer-fn))
+          file-events-chimer-fn (var-get (find-var 'spring-lobby/file-events-chimer-fn))
           r (fx/create-renderer
               :middleware (fx/wrap-map-desc
                             (fn [state]
@@ -136,10 +142,10 @@
                                :state state}))
               :opts {:fx.opt/map-event-handler event-handler})]
       (watch-fn *state)
-      (hawk-fn *state)
+      (alter-var-root #'hawk (fn [& _] (hawk-fn *state)))
+      (alter-var-root #'file-events-chimer(fn [& _] (file-events-chimer-fn *state)))
+      (alter-var-root #'tasks-chimer (fn [& _] (tasks-chimer-fn *state)))
       (alter-var-root #'renderer (constantly r)))
-    (file-events-chimer)
-    (tasks-chimer)
     (fx/mount-renderer *state renderer)
     (catch Exception e
       (println e))))

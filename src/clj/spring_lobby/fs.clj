@@ -431,9 +431,12 @@
       (string/lower-case (string/replace map-name #"\s" "_"))
       ".sd7")))
 
-(defn map-file [map-filename]
-  (when map-filename
-    (io/file (spring-root) "maps" map-filename)))
+(defn map-file
+  ([map-filename]
+   (map-file (isolation-dir) map-filename))
+  ([root map-filename]
+   (when map-filename
+     (io/file root "maps" map-filename))))
 
 (defn spring-config-line [lines field]
   (nth

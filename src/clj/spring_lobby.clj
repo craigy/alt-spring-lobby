@@ -1,5 +1,6 @@
 (ns spring-lobby
   (:require
+    [chime.core :as chime]
     [clj-http.client :as clj-http]
     [cljfx.api :as fx]
     [cljfx.component :as fx.component]
@@ -15,6 +16,7 @@
     [com.evocomputing.colors :as colors]
     [crouton.html :as html]
     [hawk.core :as hawk]
+    java-time
     [me.raynes.fs :as raynes-fs]
     [shams.priority-queue :as pq]
     [spring-lobby.battle :as battle]
@@ -175,7 +177,7 @@
      (assoc mod-data :mod-name mod-name))))
 
 (defn update-mod [state-atom file]
-  (let [mod-data (read-mod-data file {:modinfo-only true})
+  (let [mod-data (read-mod-data file {:modinfo-only false})
         mod-name (:mod-name mod-data)
         cache-file (mod-cache-file mod-name)
         mod-details (select-keys mod-data [:filename :absolute-path :mod-name ::fs/source
@@ -188,9 +190,8 @@
           battle-mod-details (:battle-mod-details state)]
       (when (or (= (:absolute-path mod-data) (:absolute-path battle-mod-details))
                 (= (:mod-name mod-details) battle-modname)) ; can this ever happen?
-        (when-let [battle-mod-data (read-mod-data file)]
-          (log/info "Updating battle mod details")
-          (swap! state-atom assoc :battle-mod-details battle-mod-data)))) ; TODO avoid dupe swap
+        (log/info "Updating battle mod details")
+        (swap! state-atom assoc :battle-mod-details mod-data))) ; TODO avoid dupe swap
     (swap! state-atom update :mods
            (fn [mods]
              (-> (remove (comp #{(:absolute-path mod-details)} :absolute-path) mods)
@@ -209,6 +210,7 @@
   (remove-watch state-atom :download)
   (remove-watch state-atom :battle-map-details)
   (remove-watch state-atom :battle-mod-details)
+  (remove-watch state-atom :fix-missing-resource)
   (add-watch-state-to-edn state-atom :config select-config "config.edn")
   (add-watch-state-to-edn state-atom :maps select-maps "maps.edn")
   (add-watch-state-to-edn state-atom :engines select-engines "engines.edn")
@@ -238,8 +240,7 @@
               new-battle-mod (-> new-state :battles (get new-battle-id) :battle-modname)]
           (when (or (not= old-battle-id new-battle-id)
                     (not= old-battle-mod new-battle-mod))
-            (log/debug "Updating battle mod details for" new-battle-mod
-                       "was" old-battle-mod)
+            (log/debug "Updating battle mod details for" new-battle-mod "was" old-battle-mod)
             (when-let [mod-details (some->> new-state
                                             :mods
                                             (filter (comp #{new-battle-mod} :mod-name))
@@ -249,16 +250,51 @@
                                             read-mod-data)]
               (swap! *state assoc :battle-mod-details mod-details))))
         (catch Exception e
+          (log/error e "Error in :battle-map-details state watcher")))))
+  (add-watch state-atom :fix-missing-resource
+    (fn [_k _ref _old-state new-state]
+      (try
+        (let [{:keys [engine-version engines map-name maps mod-name mods]} new-state
+              engine-fix (when engine-version
+                           (when-not (->> engines
+                                          (filter (comp #{engine-version} :engine-version))
+                                          first)
+                             (-> engines first :engine-version)))
+              mod-fix (when mod-name
+                        (when-not (->> mods
+                                       (filter (comp #{mod-name} :mod-name))
+                                       first)
+                          (-> mods first :mod-name)))
+              map-fix (when map-name
+                        (when-not (->> maps
+                                       (filter (comp #{map-name} :map-name))
+                                       first)
+                          (-> maps first :map-name)))]
+          #p map-name #p map-fix
+          #p mod-name #p mod-fix
+          #p engine-version #p engine-fix
+          (when (or engine-fix mod-fix map-fix)
+            (swap! state-atom
+                   (fn [state]
+                     (cond-> state
+                       engine-fix (assoc :engine-version engine-fix)
+                       mod-fix (assoc :mod-name mod-fix)
+                       map-fix (assoc :map-name map-fix))))))
+        (catch Exception e
           (log/error e "Error in :battle-map-details state watcher"))))))
 
 (defn add-hawk [state-atom]
+  (log/info "Adding hawk file watcher")
   (hawk/watch!
     [{:paths [(io/file (fs/app-root) "spring")
               (fs/spring-root)]
       :handler (fn [ctx e]
-                 (log/info "Hawk event:" e)
-                 (swap! state-atom update :file-events conj e)
-                 ctx)}]))
+                 (try
+                   (log/info "Hawk event:" e)
+                   (swap! state-atom update :file-events conj e)
+                   ctx
+                   (catch Exception e
+                     (log/error e "Error in hawk handler"))))}]))
 
 
 (defmulti task-handler ::task-type)
@@ -268,7 +304,8 @@
   (update-mod *state file))
 
 (defmethod task-handler :default [task]
-  (log/warn "Unknown task type" task))
+  (when task
+    (log/warn "Unknown task type" task)))
 
 
 ; https://www.eidel.io/2019/01/22/thread-safe-queues-clojure/
@@ -283,6 +320,20 @@
                (peek tasks))]
     (task-handler task)
     task))
+
+(defn tasks-chimer-fn [state-atom]
+  (log/info "Starting tasks chimer")
+  (let [chimer
+        (chime/chime-at
+          (chime/periodic-seq
+            (java-time/instant)
+            (java-time/duration 1 :seconds))
+          (fn [_chimestamp]
+            (handle-task! state-atom))
+          {:error-handler
+           (fn [e]
+             (log/error e "Error handling task"))})]
+    (fn [] (.close chimer))))
 
 (defn handle-all-tasks! [state-atom]
   (while (handle-task! state-atom)))
@@ -327,6 +378,20 @@
 
 (defn handle-all-file-events! [state-atom]
   (while (handle-file-event! state-atom)))
+
+(defn file-events-chimer-fn [state-atom]
+  (log/info "Starting file events chimer")
+  (let [chimer
+        (chime/chime-at
+          (chime/periodic-seq
+            (java-time/instant)
+            (java-time/duration 1 :seconds))
+          (fn [_chimestamp]
+            (handle-all-file-events! state-atom))
+          {:error-handler
+           (fn [e]
+             (log/error e "Error handling file event"))})]
+    (fn [] (.close chimer))))
 
 
 (defn reconcile-engines
@@ -1512,16 +1577,18 @@
         (swap! *state assoc-in [:copying engine-version] {:status false})))))
 
 (defmethod event-handler ::clean-engine
-  [{:keys [engine-version]}]
-  (let [isolation-dir (spring/engine-isolation-file engine-version)]
-    (log/info "Cleaning engine" engine-version "isolation dir")
+  [{:keys [engines engine-version]}]
+  (let [engine-details (spring/engine-details engines engine-version)
+        absolute-path (:absolute-path engine-details)
+        engine-dir (io/file absolute-path)]
+    (log/info "Cleaning engine" engine-version "at" engine-dir)
     (swap! *state assoc-in [:cleaning engine-version] {:status true})
     (future
       (try
-        (raynes-fs/delete-dir (io/file isolation-dir "packages"))
-        (raynes-fs/delete-dir (io/file isolation-dir "pool"))
+        (raynes-fs/delete-dir (io/file engine-dir "packages"))
+        (raynes-fs/delete-dir (io/file engine-dir "pool"))
         (catch Exception e
-          (log/error e "Error cleaning engine" engine-version "isolation dir"))
+          (log/error e "Error cleaning engine" engine-version "at" engine-dir))
         (finally
           (swap! *state assoc-in [:cleaning engine-version] {:status false}))))))
 
@@ -1554,10 +1621,10 @@
   (future
     (try
       (let [[_all dir] (re-find #"/([^/]+)\.git" repo-url)]
-        (git/clone-repo repo-url (io/file (fs/spring-root) "games" dir)
-                        {:on-begin-task (fn [title total-work]
-                                          (let [m (str title " " total-work)]
-                                            (swap! *state assoc-in [:git-clone repo-url :message] m)))}))
+        (git/clone-repo repo-url (io/file (fs/isolation-dir) "games" dir)
+          {:on-begin-task (fn [title total-work]
+                            (let [m (str title " " total-work)]
+                              (swap! *state assoc-in [:git-clone repo-url :message] m)))}))
       (reconcile-mods *state)
       (catch Exception e
         (log/error e "Error cloning git repo" repo-url))
@@ -1765,7 +1832,7 @@
 
 
 (defn battle-players-table
-  [{:keys [am-host host-username players username]}]
+  [{:keys [am-host battle-modname host-username players username]}]
   {:fx/type :table-view
    :column-resize-policy :constrained ; TODO auto resize
    :items (or players [])
@@ -1869,12 +1936,12 @@
           :key (nickname i)
           :desc
           {:fx/type :choice-box
-           :value (->> i :battle-status :side (get spring/sides) str)
+           :value (->> i :battle-status :side (get (spring/sides battle-modname)) str)
            :on-value-changed {:event/type ::battle-side-changed
                               :is-me (= (:username i) username)
                               :is-bot (-> i :user :client-status :bot)
                               :id i}
-           :items (vals spring/sides)
+           :items (vals (spring/sides battle-modname))
            :disable (not (or am-host
                              (= (:username i) username)
                              (= (:owner i) username)))}}})}}
@@ -2052,7 +2119,8 @@
          :am-host am-host
          :host-username host-username
          :players (battle-players-and-bots state)
-         :username username}
+         :username username
+         :battle-modname battle-modname}
         {:fx/type :h-box
          :children
          [{:fx/type :v-box
@@ -2163,8 +2231,9 @@
                               :rapid-id rapid-id
                               :git-url git-url
                               :engine-dir-filename (spring/engine-dir-filename engines engine-version)}}])
-                 (if-let [mod-isolation-archive-file (spring/mod-isolation-archive-file
-                                                       battle-mod-details engine-version)]
+                 #_
+                 (if-let [mod-file (when-let [absolute-path (:absolute-path battle-mod-details)]
+                                     (io/file absolute-path))]
                    (let [in-progress (-> archiving (get (:filename battle-mod-details)) :status)]
                      [{:severity (if (and (.exists mod-isolation-archive-file)
                                           (not in-progress))
@@ -2173,28 +2242,28 @@
                        :in-progress in-progress
                        :action {:event/type ::archive-mod
                                 :mod-details battle-mod-details
+                                :engine-version engine-version}}]))
+                 (when-let [mod-file (when-let [absolute-path (:absolute-path battle-mod-details)]
+                                       (io/file absolute-path))]
+                   (let [in-progress (-> copying (get (:filename battle-mod-details)) :status)]
+                     [{:severity (if (and (.exists mod-file)
+                                          (not in-progress))
+                                   0 1)
+                       :text "copy"
+                       :in-progress in-progress
+                       :action {:event/type ::copy-mod
+                                :mod-details battle-mod-details
                                 :engine-version engine-version}}])
-                   (when-let [mod-isolation-file (spring/mod-isolation-file
-                                                   battle-mod-details engine-version)]
-                     (let [in-progress (-> copying (get (:filename battle-mod-details)) :status)]
-                       [{:severity (if (and (.exists mod-isolation-file)
-                                            (not in-progress))
-                                     0 1)
-                         :text "copy"
-                         :in-progress in-progress
-                         :action {:event/type ::copy-mod
-                                  :mod-details battle-mod-details
-                                  :engine-version engine-version}}])
-                     (when (and (= :directory
-                                   (::fs/source battle-mod-details)))
-                       [{:severity (if (= battle-modname
-                                          (:mod-name battle-mod-details))
-                                     0 1)
-                         :text "git"
-                         :in-progress false
-                         :action {:event/type ::git-mod
-                                  :mod-details battle-mod-details
-                                  :battle-modname battle-modname}}]))))}
+                   (when (and (= :directory
+                                 (::fs/source battle-mod-details)))
+                     [{:severity (if (= battle-modname
+                                        (:mod-name battle-mod-details))
+                                   0 1)
+                       :text "git"
+                       :in-progress false
+                       :action {:event/type ::git-mod
+                                :mod-details battle-mod-details
+                                :battle-modname battle-modname}}])))}
               {:fx/type resource-sync-pane
                :h-box/margin 8
                :resource "engine" ; engine-version ; (str "engine (" engine-version ")")
@@ -2246,7 +2315,8 @@
                          :text "clean"
                          :in-progress in-progress
                          :action {:event/type ::clean-engine
-                                  :engine-version engine-version}})])))}]}
+                                  :engine-version engine-version
+                                  :engines engines}})])))}]}
             {:fx/type :h-box
              :alignment :center-left
              :style {:-fx-font-size 24}
@@ -2546,7 +2616,7 @@
                            :users users
                            :username username}}
               {:fx/type :button
-               :text "Humans vs bots"
+               :text "Humans vs Bots"
                :on-action {:event/type ::battle-teams-humans-vs-bots
                            :battle battle
                            :users users
@@ -3439,6 +3509,9 @@
   (Platform/setImplicitExit true)
   (swap! *state assoc :standalone true)
   (add-watchers *state)
+  (add-hawk *state)
+  (tasks-chimer-fn *state)
+  (file-events-chimer-fn *state)
   (let [r (fx/create-renderer
             :middleware (fx/wrap-map-desc
                           (fn [state]
