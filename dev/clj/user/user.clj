@@ -50,6 +50,7 @@
         (catch Exception e
           (println "error adding watchers" e))))
     (alter-var-root (find-var 'spring-lobby/*state) (constantly *state))
+    #_
     (future
       (when hawk
         (try
@@ -73,16 +74,16 @@
         (catch Exception e
           (println "error starting tasks" e))))
     (future
-      (try
-        (let [chimer-fn (var-get (find-var 'spring-lobby/file-events-chimer-fn))]
-          (alter-var-root #'file-events-chimer (fn [& _] (chimer-fn *state))))
-        (catch Exception e
-          (println "error starting file events" e)))
       (when file-events-chimer
         (try
           (file-events-chimer)
           (catch Exception e
-            (println "error stopping file events" e)))))
+            (println "error stopping file events" e))))
+      (try
+        (let [chimer-fn (var-get (find-var 'spring-lobby/file-events-chimer-fn))]
+          (alter-var-root #'file-events-chimer (fn [& _] (chimer-fn *state))))
+        (catch Exception e
+          (println "error starting file events" e))))
     (if renderer
       (do
         (println "Re-rendering")
@@ -139,7 +140,7 @@
     (alter-var-root #'*state (constantly (var-get (find-var 'spring-lobby/*state))))
     ; just use spring-lobby/*state for initial state, on refresh copy user/*state var back
     (let [watch-fn (var-get (find-var 'spring-lobby/add-watchers))
-          hawk-fn (var-get (find-var 'spring-lobby/add-hawk))
+          ;hawk-fn (var-get (find-var 'spring-lobby/add-hawk))
           tasks-chimer-fn (var-get (find-var 'spring-lobby/tasks-chimer-fn))
           file-events-chimer-fn (var-get (find-var 'spring-lobby/file-events-chimer-fn))
           r (fx/create-renderer
@@ -149,9 +150,9 @@
                                :state state}))
               :opts {:fx.opt/map-event-handler event-handler})]
       (watch-fn *state)
-      (alter-var-root #'hawk (fn [& _] (hawk-fn *state)))
-      (alter-var-root #'file-events-chimer(fn [& _] (file-events-chimer-fn *state)))
+      ;(alter-var-root #'hawk (fn [& _] (hawk-fn *state)))
       (alter-var-root #'tasks-chimer (fn [& _] (tasks-chimer-fn *state)))
+      (alter-var-root #'file-events-chimer(fn [& _] (file-events-chimer-fn *state)))
       (alter-var-root #'renderer (constantly r)))
     (fx/mount-renderer *state renderer)
     (catch Exception e

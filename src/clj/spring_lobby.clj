@@ -298,7 +298,7 @@
         (catch Exception e
           (log/error e "Error in :battle-map-details state watcher"))))))
 
-(defn add-hawk [state-atom]
+(defn add-hawk! [state-atom]
   (log/info "Adding hawk file watcher")
   (hawk/watch!
     [{:paths [(fs/download-dir)
@@ -306,11 +306,11 @@
               (fs/spring-root)]
       :handler (fn [ctx e]
                  (try
-                   (log/info "Hawk event:" e)
+                   (log/trace "Hawk event:" e)
                    (swap! state-atom update :file-events conj e)
-                   ctx
                    (catch Exception e
-                     (log/error e "Error in hawk handler")
+                     (log/error e "Error in hawk handler"))
+                   (finally
                      ctx)))}]))
 
 
@@ -365,11 +365,43 @@
     (log/warn "Attempt to add nil task" task)))
 
 
-; https://www.eidel.io/2019/01/22/thread-safe-queues-clojure/
-(defn handle-file-event! [state-atom]
-  (let [[before _after] (swap-vals! state-atom update :file-events pop)
-        file-event (-> before :file-events peek)
-        {:keys [file]} file-event
+(defn file-event-task [file-event]
+  (let [{:keys [file]} file-event
+        ;root (io/file (fs/spring-root) "games") ; TODO check spring and BAR dirs...
+        ;root (io/file (fs/bar-root) "games") ; TODO check spring and BAR dirs...
+        root (fs/isolation-dir)
+        games (io/file root "games")
+        maps (io/file root "maps")]
+    (when file
+      (cond
+        (not file)
+        (log/info "nil file")
+        ; update possible mod file
+        (or (fs/child? games file)
+            (and (fs/child? (io/file root "packages") file)
+                 (string/ends-with? (.getName file) ".sdp")))
+        {::task-type ::update-mod
+         :file file}
+        ; or mod in directory / git format
+        (fs/descendant? games file)
+        (loop [parent file] ; find directory in games
+          (when parent
+            (if (fs/child? games parent)
+              {::task-type ::update-mod
+               :file parent}
+              (recur (.getParentFile parent)))))
+        (fs/descendant? maps file)
+        (loop [parent file] ; find file in maps
+          (when parent
+            (if (fs/child? maps parent)
+              {::task-type ::update-map
+               :file parent}
+              (recur (.getParentFile parent)))))
+        :else
+        (log/warn "Nothing to do for" file-event)))))
+
+(defn handle-file-event [state-atom file-event]
+  (let [{:keys [file]} file-event
         ;root (io/file (fs/spring-root) "games") ; TODO check spring and BAR dirs...
         ;root (io/file (fs/bar-root) "games") ; TODO check spring and BAR dirs...
         root (fs/isolation-dir)
@@ -404,23 +436,52 @@
         (log/warn "Nothing to do for" file-event)))
     file-event))
 
+
+(defn handle-file-event! [state-atom]
+  (let [[before _after] (swap-vals! state-atom update :file-events pop)
+        file-event (-> before :file-events peek)]
+    (handle-file-event state-atom file-event)))
+
+; https://www.eidel.io/2019/01/22/thread-safe-queues-clojure/
+(defn pop-file-event! [state-atom]
+  (let [[before _after] (swap-vals! state-atom update :file-events pop)]
+    (-> before :file-events peek)))
+
 (defn handle-all-file-events! [state-atom]
-  (while (handle-file-event! state-atom)))
+  (let [events (loop [all []]
+                 (if-let [event (pop-file-event! state-atom)]
+                   (recur (conj all event))
+                   all))
+        tasks (set (filter some? (map file-event-task events)))]
+    (when (seq events)
+      (log/info "From" (count events) "file events got" (count tasks) "tasks"))
+    (doseq [task tasks] ; TODO all at once?
+      (add-task! state-atom task))))
 
 (defn file-events-chimer-fn [state-atom]
   (log/info "Starting file events chimer")
-  (let [chimer
+  (let [hawk-atom (atom (add-hawk! state-atom))
+        chimer
         (chime/chime-at
           (chime/periodic-seq
             (java-time/instant)
             (java-time/duration 1 :seconds))
           (fn [_chimestamp]
+            (let [hawk @hawk-atom]
+              (when-not (.isAlive (:thread hawk))
+                (log/warn "Hawk watcher died, starting a new one")
+                (hawk/stop! hawk)
+                (reset! hawk-atom (add-hawk! state-atom))))
             (handle-all-file-events! state-atom))
           {:error-handler
            (fn [e]
              (log/error e "Error handling file event")
              true)})]
-    (fn [] (.close chimer))))
+    (fn []
+      (let [hawk @hawk-atom]
+        (when hawk
+          (hawk/stop! hawk)))
+      (.close chimer))))
 
 
 (defn reconcile-engines
@@ -3571,7 +3632,7 @@
   (Platform/setImplicitExit true)
   (swap! *state assoc :standalone true)
   (add-watchers *state)
-  (add-hawk *state)
+  ;(add-hawk *state)
   (tasks-chimer-fn *state)
   (file-events-chimer-fn *state)
   (let [r (fx/create-renderer
