@@ -25,14 +25,8 @@
 (set! *warn-on-reflection* true)
 
 
-(def o (Object.))
-
-(future
-  (try
-    (locking o
-      (SevenZip/initSevenZipFromPlatformJAR))
-    (catch Exception e
-      (log/error e))))
+(defn init-7z! []
+  (SevenZip/initSevenZipFromPlatformJAR))
 
 
 (def config-filename "config.edn")
@@ -111,6 +105,9 @@
 
 (defn spring-executable []
   (executable "spring"))
+
+(defn spring-headless-executable []
+  (executable "spring-headless"))
 
 
 (defn bar-root
@@ -313,7 +310,7 @@
 
 
 (defn sync-version [engine-dir]
-  (let [engine-exe (io/file engine-dir (spring-executable))
+  (let [engine-exe (io/file engine-dir (spring-headless-executable))
         _ (.setExecutable engine-exe true)
         command [(.getAbsolutePath engine-exe) "--sync-version"]
         ^"[Ljava.lang.String;" cmdarray (into-array String command)
@@ -324,6 +321,12 @@
       (log/info "Discovered sync-version of" engine-exe "is" (str "'" sync-version "'"))
       sync-version)))
 
+
+(defn engines-dir
+  ([]
+   (engines-dir (isolation-dir)))
+  ([root]
+   (io/file root "engine")))
 
 (defn engine-dirs
   ([]
@@ -348,6 +351,19 @@
                   first)]
     (slurp (.getInputStream zip-file entry))))
 
+
+(defn mods-dir
+  ([]
+   (mods-dir (isolation-dir)))
+  ([root]
+   (io/file root "games")))
+
+(defn mod-file
+  ([mod-filename]
+   (mod-file (isolation-dir) mod-filename))
+  ([root mod-filename]
+   (when mod-filename
+     (io/file (mods-dir root) mod-filename))))
 
 (defn mod-files
   ([]
@@ -428,12 +444,18 @@
       (string/lower-case (string/replace map-name #"\s" "_"))
       ".sd7")))
 
+(defn maps-dir
+  ([]
+   (maps-dir (isolation-dir)))
+  ([root]
+   (io/file root "maps")))
+
 (defn map-file
   ([map-filename]
    (map-file (isolation-dir) map-filename))
   ([root map-filename]
    (when map-filename
-     (io/file root "maps" map-filename))))
+     (io/file (maps-dir root) map-filename))))
 
 (defn spring-config-line [lines field]
   (nth
