@@ -301,10 +301,6 @@
      (log/info "Finished extracting" f "to" dest))))
 
 
-#_
-(extract-7z (io/file (spring-root) "engine" "spring_103.0_win32-minimal-portable.7z"))
-
-
 (defn sync-version-to-engine-version
   "Returns the Spring engine version from a sync version. For some reason, engine '103.0' has sync
   version '103' whereas for engine 104.0.1-1553-gd3c0012 maintenance the sync version is the same,
