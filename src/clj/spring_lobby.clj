@@ -224,7 +224,10 @@
               old-battle-map (-> old-state :battles (get old-battle-id) :battle-map)
               new-battle-map (-> new-state :battles (get new-battle-id) :battle-map)]
           (when (or (not= old-battle-id new-battle-id)
-                    (not= old-battle-map new-battle-map))
+                    (not= old-battle-map new-battle-map)
+                    (and new-battle-map
+                         (not (:battle-map-details new-state))
+                         (->> new-state :maps (filter (comp #{new-battle-map} :map-name)) first)))
             (log/debug "Updating battle map details for" new-battle-map
                        "was" old-battle-map)
             (let [map-details (safe-read-map-cache new-battle-map)]
@@ -292,7 +295,8 @@
                    (swap! state-atom update :file-events conj e)
                    ctx
                    (catch Exception e
-                     (log/error e "Error in hawk handler"))))}]))
+                     (log/error e "Error in hawk handler")
+                     ctx)))}]))
 
 
 (defmulti task-handler ::task-type)
@@ -330,7 +334,8 @@
             (handle-task! state-atom))
           {:error-handler
            (fn [e]
-             (log/error e "Error handling task"))})]
+             (log/error e "Error handling task")
+             true)})]
     (fn [] (.close chimer))))
 
 (defn handle-all-tasks! [state-atom]
@@ -353,9 +358,12 @@
         ;root (io/file (fs/spring-root) "games") ; TODO check spring and BAR dirs...
         ;root (io/file (fs/bar-root) "games") ; TODO check spring and BAR dirs...
         root (fs/isolation-dir)
-        games (io/file root "games")]
+        games (io/file root "games")
+        maps (io/file root "maps")]
     (when file
       (cond
+        (not file)
+        (log/info "nil file")
         ; update possible mod file
         (or (fs/child? games file)
             (and (fs/child? (io/file root "packages") file)
@@ -368,6 +376,13 @@
           (when parent
             (if (fs/child? games parent)
               (add-task! state-atom {::task-type ::update-mod
+                                     :file parent})
+              (recur (.getParentFile parent)))))
+        (fs/descendant? maps file)
+        (loop [parent file] ; find file in maps
+          (when parent
+            (if (fs/child? maps parent)
+              (add-task! state-atom {::task-type ::update-map
                                      :file parent})
               (recur (.getParentFile parent)))))
         :else
@@ -388,7 +403,8 @@
             (handle-all-file-events! state-atom))
           {:error-handler
            (fn [e]
-             (log/error e "Error handling file event"))})]
+             (log/error e "Error handling file event")
+             true)})]
     (fn [] (.close chimer))))
 
 
@@ -525,6 +541,11 @@
                   (remove (comp missing-filenames :filename))
                   set)))
     {:todo-count (count todo)}))
+
+
+(defmethod task-handler ::update-map
+  [{:keys [file]}]
+  (reconcile-maps *state))
 
 
 (defmulti event-handler :event/type)
@@ -1510,6 +1531,21 @@
       (finally
         (swap! *state assoc-in [:copying map-filename] {:status false})))))
 
+(defmethod event-handler ::import-map
+  [{:keys [source dest]}]
+  (when source
+    (let [filename (.getName source)
+          dest (or dest (fs/map-file filename))]
+      (log/info "Importing map" filename "from" source "to" dest)
+      (swap! *state assoc-in [:copying filename] {:status true})
+      (future
+        (try
+          (spring/java-nio-copy source dest)
+          (catch Exception e
+            (log/error e "Error importing map" filename "from" source "to" dest))
+          (finally
+            (swap! *state assoc-in [:copying filename] {:status false})))))))
+
 (defmethod event-handler ::copy-mod
   [{:keys [mod-details engine-version]}]
   (let [mod-filename (:filename mod-details)]
@@ -2208,7 +2244,18 @@
                        :in-progress in-progress
                        :action {:event/type ::copy-map
                                 :map-filename map-filename
-                                :engine-version engine-version}}])))}
+                                :engine-version engine-version}}]))
+                 (let [map-filename (fs/map-filename battle-map)
+                       in-progress (-> copying (get map-filename) :status)]
+                   (when-let [spring-map-file (fs/map-file (fs/spring-root) map-filename)]
+                     [{:severity (if (and (not battle-map-details)
+                                          (.exists spring-map-file)
+                                          (not in-progress))
+                                   2 0)
+                       :text "import"
+                       :in-progress in-progress
+                       :action {:event/type ::import-map
+                                :source spring-map-file}}])))}
               {:fx/type resource-sync-pane
                :h-box/margin 8
                :resource "game" ;battle-modname ; (str "game (" battle-modname ")")

@@ -299,6 +299,7 @@
       (ex-info "Missing engine to copy to isolation dir"
                {:engine-version engine-version}))))
 
+; TODO move to fs
 (defn java-nio-copy
   ([^java.io.File source ^java.io.File dest]
    (java-nio-copy source dest nil))
