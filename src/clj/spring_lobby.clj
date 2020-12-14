@@ -1667,7 +1667,12 @@
              :h-box/hgrow :always}]
            (when refresh-action
              [{:fx/type :button
-               :alignment :top-right
+               :on-action refresh-action
+               :tooltip
+               {:fx/type :tooltip
+                :show-delay [10 :ms]
+                :style {:-fx-font-size 14}
+                :text "Force refresh this resource"}
                :h-box/margin 4
                :style
                {:-fx-base "black"
@@ -1679,6 +1684,11 @@
            (when delete-action
              [{:fx/type :button
                :on-action delete-action
+               :tooltip
+               {:fx/type :tooltip
+                :show-delay [10 :ms]
+                :style {:-fx-font-size 14}
+                :text "Delete this resource"}
                :h-box/margin 4
                :style
                {:-fx-base "black"
@@ -2312,6 +2322,8 @@
       (catch Exception e
         (log/error e "Error nuking data dir")))))
 
+#_
+(-> user/*state deref :battle-map-details keys)
 
 (defn battle-view
   [{:keys [battle battles battle-map-details battle-mod-details bot-name bot-username bot-version
@@ -2321,7 +2333,7 @@
   (let [{:keys [host-username battle-map]} (get battles (:battle-id battle))
         host-user (get users host-username)
         am-host (= username host-username)
-        battle-modname (:battle-modname (get battles (:battle-id battle)))
+        {:keys [battle-map battle-modname]} (get battles (:battle-id battle))
         ;mod-details (spring/mod-details mods battle-modname)
         scripttags (:scripttags battle)
         startpostype (->> scripttags
@@ -2435,39 +2447,54 @@
                :resource "Map" ;battle-map ; (str "map (" battle-map ")")
                ;:delete-action {:event/type ::delete-map}
                :issues
-               (concat
-                 (let [url (http/map-url battle-map)
-                       download (get http-download url)
-                       in-progress (:running download)
-                       text (or (when in-progress (:message download))
-                                "download")]
-                   [{:severity (if battle-map-details 0 2)
-                     :text text
-                     :in-progress in-progress
-                     :action {:event/type ::download-map
-                              :map-name battle-map}}])
-                 (let [map-filename (:filename battle-map-details)
-                       in-progress (-> copying (get map-filename) :status)]
-                   (when-let [map-isolation-file (spring/map-isolation-file map-filename engine-version)]
-                     [{:severity (if (and (.exists map-isolation-file)
-                                          (not in-progress))
-                                   0 1)
-                       :text "copy"
+               (let [
+                     map-filename (:filename battle-map-details)
+                     map-download-file nil ; TODO
+                     map-isolation-file (spring/map-isolation-file      ; needs to be read from maps
+                                          map-filename engine-version) ; TODO allow different names
+                     importable (some->> importables ; TODO import option
+                                         (filter (comp #{::map} :resource-type))
+                                         (filter (comp #{battle-map} :resource-name))
+                                         first)]
+                 (concat
+                   (let [url (http/map-url battle-map) ; TODO this is only a guess
+                         download (get http-download url)
+                         in-progress (:running download)
+                         text (or (when in-progress (:message download))
+                                  "download")
+                         severity (if battle-map-details 0 2)]
+                     [{:severity severity
+                       :text text
+                       :human-text (if (zero? severity)
+                                     (:map-name battle-map-details)
+                                     (str "Download map " (:map-name battle-map-details))) ; TODO filename
+                       :tooltip (if (zero? severity)
+                                  map-filename ; TODO map absolute path here
+                                  (str "Download from " url))
                        :in-progress in-progress
-                       :action {:event/type ::copy-map
-                                :map-filename map-filename
-                                :engine-version engine-version}}]))
-                 (let [map-filename (fs/map-filename battle-map)
-                       in-progress (-> copying (get map-filename) :status)]
-                   (when-let [spring-map-file (fs/map-file (fs/spring-root) map-filename)]
-                     [{:severity (if (and (not battle-map-details)
-                                          (.exists spring-map-file)
-                                          (not in-progress))
-                                   2 0)
+                       :action {:event/type ::download-map
+                                :map-name battle-map}}])
+                   (when (and map-download-file
+                              (.exists map-download-file) ; FIXME IO IN RENDER
+                              (not battle-map-details))
+                     (let [in-progress (-> copying (get map-filename) :status)]
+                       [{:severity 2
+                         :text "copy"
+                         :human-text "Copy map from downloads"
+                         :tooltip (str "Copy from" map-download-file " to " map-isolation-file)
+                         :in-progress in-progress
+                         :action {:event/type ::copy-map
+                                  :map-filename map-filename
+                                  :engine-version engine-version}}]))
+                   (when (and (not battle-map-details)
+                              importable)
+                     [{:severity 2
                        :text "import"
-                       :in-progress in-progress
+                       :human-text (str "Import from " (:import-source-name importable))
+                       :tooltip (str "Import from " (:import-file importable))
+                       :in-progress (-> copying (get map-filename) :status)
                        :action {:event/type ::import-map
-                                :source spring-map-file}}])))}
+                                :imoprtable importable}}])))}
               {:fx/type resource-sync-pane
                :h-box/margin 8
                :resource "Game" ;battle-modname ; (str "game (" battle-modname ")")
