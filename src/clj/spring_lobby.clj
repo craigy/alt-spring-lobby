@@ -270,9 +270,6 @@
                                        (filter (comp #{map-name} :map-name))
                                        first)
                           (-> maps first :map-name)))]
-          #p map-name #p map-fix
-          #p mod-name #p mod-fix
-          #p engine-version #p engine-fix
           (when (or engine-fix mod-fix map-fix)
             (swap! state-atom
                    (fn [state]
@@ -286,7 +283,8 @@
 (defn add-hawk [state-atom]
   (log/info "Adding hawk file watcher")
   (hawk/watch!
-    [{:paths [(io/file (fs/app-root) "spring")
+    [{:paths [(fs/download-dir)
+              (fs/isolation-dir)
               (fs/spring-root)]
       :handler (fn [ctx e]
                  (try
@@ -906,24 +904,13 @@
 
 (defn map-list
   [{:keys [disable map-name maps on-value-changed map-input-prefix]}]
-  (cond
-    (not maps)
-    {:fx/type :v-box
-     :alignment :center-left
-     :children
-     [{:fx/type :label
-       :text "Loading maps..."}]}
-    (not (seq maps))
-    {:fx/type :v-box
-     :alignment :center-left
-     :children
-     [{:fx/type :label
-       :text "No maps"}]}
-    :else
-    {:fx/type :h-box
-     :alignment :center-left
-     :children
-     (concat
+  {:fx/type :h-box
+   :alignment :center-left
+   :children
+   (concat
+     (if (empty? maps)
+       [{:fx/type :label
+         :text "No maps "}]
        [(let [filter-lc (if map-input-prefix (string/lower-case map-input-prefix) "")
               filtered-maps
               (->> maps
@@ -952,48 +939,48 @@
            :on-hidden {:event/type ::maps-hidden}
            :tooltip {:fx/type :tooltip
                      :show-delay [10 :ms]
-                     :text (or map-input-prefix "Choose map")}})
-        {:fx/type fx.ext.node/with-tooltip-props
-         :props
-         {:tooltip
-          {:fx/type :tooltip
-           :show-delay [10 :ms]
-           :text "Browse and download maps with http"}}
-         :desc
-         {:fx/type :button
-          :on-action {:event/type ::show-http-downloader}
-          :graphic
-          {:fx/type font-icon/lifecycle
-           :icon-literal (str "mdi-download:16:white")}}}]
-       (when (seq maps)
-         [{:fx/type fx.ext.node/with-tooltip-props
-           :props
-           {:tooltip
-            {:fx/type :tooltip
-             :show-delay [10 :ms]
-             :text "Random map"}}
-           :desc
-           {:fx/type :button
-            :disable disable
-            :on-action (fn [& _]
-                         (event-handler
-                           (let [random-map-name (:map-name (rand-nth (seq maps)))]
-                             (assoc on-value-changed :map-name random-map-name))))
-            :graphic
-            {:fx/type font-icon/lifecycle
-             :icon-literal (str "mdi-dice-" (inc (rand-nth (take 6 (iterate inc 0)))) ":16:white")}}}])
+                     :text (or map-input-prefix "Choose map")}})])
+     [{:fx/type fx.ext.node/with-tooltip-props
+       :props
+       {:tooltip
+        {:fx/type :tooltip
+         :show-delay [10 :ms]
+         :text "Browse and download maps with http"}}
+       :desc
+       {:fx/type :button
+        :on-action {:event/type ::show-http-downloader}
+        :graphic
+        {:fx/type font-icon/lifecycle
+         :icon-literal (str "mdi-download:16:white")}}}]
+     (when (seq maps)
        [{:fx/type fx.ext.node/with-tooltip-props
          :props
          {:tooltip
           {:fx/type :tooltip
            :show-delay [10 :ms]
-           :text "Reload maps"}}
+           :text "Random map"}}
          :desc
          {:fx/type :button
-          :on-action {:event/type ::reload-maps}
+          :disable disable
+          :on-action (fn [& _]
+                       (event-handler
+                         (let [random-map-name (:map-name (rand-nth (seq maps)))]
+                           (assoc on-value-changed :map-name random-map-name))))
           :graphic
           {:fx/type font-icon/lifecycle
-           :icon-literal "mdi-refresh:16:white"}}}])}))
+           :icon-literal (str "mdi-dice-" (inc (rand-nth (take 6 (iterate inc 0)))) ":16:white")}}}]
+      [{:fx/type fx.ext.node/with-tooltip-props
+        :props
+        {:tooltip
+         {:fx/type :tooltip
+          :show-delay [10 :ms]
+          :text "Reload maps"}}
+        :desc
+        {:fx/type :button
+         :on-action {:event/type ::reload-maps}
+         :graphic
+         {:fx/type font-icon/lifecycle
+          :icon-literal "mdi-refresh:16:white"}}}]))})
 
 (defmethod event-handler ::engines-key-pressed [{:fx/keys [event]}]
   (swap! *state update :engine-filter (update-filter-fn event)))
@@ -1021,65 +1008,71 @@
      [{:fx/type :h-box
        :alignment :center-left
        :children
-       [{:fx/type :label
-         :text " Engine: "}
-        (let [filter-lc (if engine-filter (string/lower-case engine-filter) "")
-              filtered-engines (->> engines
-                                    (map :engine-version)
-                                    (filter #(string/includes? (string/lower-case %) filter-lc))
-                                    sort)]
-          {:fx/type :combo-box
-           :value (str engine-version)
-           :items filtered-engines
-           :disable (boolean battle)
-           :on-value-changed {:event/type ::version-change}
-           :cell-factory
-           {:fx/cell-type :list-cell
-            :describe (fn [engine] {:text (str engine)})}
-           :on-key-pressed {:event/type ::engines-key-pressed}
-           :on-hidden {:event/type ::engines-hidden}
-           :tooltip {:fx/type :tooltip
-                     :show-delay [10 :ms]
-                     :text (or engine-filter "Choose engine")}})
-        {:fx/type fx.ext.node/with-tooltip-props
-         :props
-         {:tooltip
-          {:fx/type :tooltip
-           :show-delay [10 :ms]
-           :text "Browse and download engines with http"}}
-         :desc
-         {:fx/type :button
-          :on-action {:event/type ::show-http-downloader}
-          :graphic
-          {:fx/type font-icon/lifecycle
-           :icon-literal (str "mdi-download:16:white")}}}
-        {:fx/type fx.ext.node/with-tooltip-props
-         :props
-         {:tooltip
-          {:fx/type :tooltip
-           :show-delay [10 :ms]
-           :text "Reload engines"}}
-         :desc
-         {:fx/type :button
-          :on-action {:event/type ::reload-engines}
-          :graphic
-          {:fx/type font-icon/lifecycle
-           :icon-literal "mdi-refresh:16:white"}}}]}
+       (concat
+         [{:fx/type :label
+           :text " Engine: "}]
+         (if (empty? engines)
+           [{:fx/type :label
+             :text "No engines "}]
+           (let [filter-lc (if engine-filter (string/lower-case engine-filter) "")
+                 filtered-engines (->> engines
+                                       (map :engine-version)
+                                       (filter #(string/includes? (string/lower-case %) filter-lc))
+                                       sort)]
+             [{:fx/type :combo-box
+               :value (str engine-version)
+               :items filtered-engines
+               :disable (boolean battle)
+               :on-value-changed {:event/type ::version-change}
+               :cell-factory
+               {:fx/cell-type :list-cell
+                :describe (fn [engine] {:text (str engine)})}
+               :on-key-pressed {:event/type ::engines-key-pressed}
+               :on-hidden {:event/type ::engines-hidden}
+               :tooltip {:fx/type :tooltip
+                         :show-delay [10 :ms]
+                         :text (or engine-filter "Choose engine")}}]))
+         [{:fx/type fx.ext.node/with-tooltip-props
+           :props
+           {:tooltip
+            {:fx/type :tooltip
+             :show-delay [10 :ms]
+             :text "Browse and download engines with http"}}
+           :desc
+           {:fx/type :button
+            :on-action {:event/type ::show-http-downloader}
+            :graphic
+            {:fx/type font-icon/lifecycle
+             :icon-literal (str "mdi-download:16:white")}}}
+          {:fx/type fx.ext.node/with-tooltip-props
+           :props
+           {:tooltip
+            {:fx/type :tooltip
+             :show-delay [10 :ms]
+             :text "Reload engines"}}
+           :desc
+           {:fx/type :button
+            :on-action {:event/type ::reload-engines}
+            :graphic
+            {:fx/type font-icon/lifecycle
+             :icon-literal "mdi-refresh:16:white"}}}])}
       {:fx/type :h-box
        :alignment :center-left
        :children
        (concat
-         (if mods
+         [{:fx/type :label
+           :alignment :center-left
+           :text " Game: "}]
+         (if (empty? mods)
            [{:fx/type :label
-             :alignment :center-left
-             :text " Game: "}
-            (let [filter-lc (if mod-filter (string/lower-case mod-filter) "")
-                  filtered-mods (->> mods
-                                     (map :mod-name)
-                                     (filter string?)
-                                     (filter #(string/includes? (string/lower-case %) filter-lc))
-                                     (sort version/version-compare))]
-              {:fx/type :combo-box
+             :text "No games "}]
+           (let [filter-lc (if mod-filter (string/lower-case mod-filter) "")
+                 filtered-mods (->> mods
+                                    (map :mod-name)
+                                    (filter string?)
+                                    (filter #(string/includes? (string/lower-case %) filter-lc))
+                                    (sort version/version-compare))]
+             [{:fx/type :combo-box
                :value (str mod-name)
                :items filtered-mods
                :disable (boolean battle)
@@ -1091,9 +1084,7 @@
                :on-hidden {:event/type ::mods-hidden}
                :tooltip {:fx/type :tooltip
                          :show-delay [10 :ms]
-                         :text (or mod-filter "Choose game")}})]
-           [{:fx/type :label
-             :text "Loading games..."}])
+                         :text (or mod-filter "Choose game")}}]))
          [{:fx/type fx.ext.node/with-tooltip-props
            :props
            {:tooltip
@@ -2065,6 +2056,15 @@
       (raynes-fs/delete-dir engine-dir)
       (reconcile-engines *state))
     (log/warn "No engine dir for" (pr-str engine-version) "found in" (with-out-str (pprint engines)))))
+
+(defmethod event-handler ::nuke-data-dir
+  [_e]
+  (future
+    (try
+      (log/info "Nuking data dir!" (fs/isolation-dir))
+      (raynes-fs/delete-dir (fs/isolation-dir))
+      (catch Exception e
+        (log/error e "Error nuking data dir")))))
 
 
 (defn battle-view
@@ -3482,7 +3482,7 @@
                      (if filename
                        (let [url (str maps-index-url "/" url)
                              download (get http-download url)
-                             dest (io/file (fs/spring-root) "maps" filename)]
+                             dest (io/file (fs/download-dir) "maps" filename)]
                          (merge
                            {:text (str (:message download))
                             :style {:-fx-font-family "monospace"}}

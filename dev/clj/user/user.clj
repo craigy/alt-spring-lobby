@@ -43,39 +43,46 @@
     (println "Requiring spring-lobby ns")
     (require 'spring-lobby)
     (alter-var-root (find-var 'spring-lobby/*state) (constantly *state))
-    (let [watch-fn (var-get (find-var 'spring-lobby/add-watchers))]
-      (watch-fn *state))
-    (when hawk
+    (future
       (try
-        (hawk/stop! hawk)
+        (let [watch-fn (var-get (find-var 'spring-lobby/add-watchers))]
+          (watch-fn *state))
         (catch Exception e
-          (println "error stopping hawk" e))))
-    (when tasks-chimer
-      (try
-        (tasks-chimer)
-        (catch Exception e
-          (println "error stopping tasks" e))))
-    (when file-events-chimer
-      (try
-        (file-events-chimer)
-        (catch Exception e
-          (println "error stopping file events" e))))
+          (println "error adding watchers" e))))
     (alter-var-root (find-var 'spring-lobby/*state) (constantly *state))
-    (try
-      (let [hawk-fn (var-get (find-var 'spring-lobby/add-hawk))]
-        (alter-var-root #'hawk (fn [& _] (hawk-fn *state))))
-      (catch Exception e
-        (println "error starting hawk" e)))
-    (try
-      (let [chimer-fn (var-get (find-var 'spring-lobby/tasks-chimer-fn))]
-        (alter-var-root #'tasks-chimer (fn [& _] (chimer-fn *state))))
-      (catch Exception e
-        (println "error starting tasks" e)))
-    (try
-      (let [chimer-fn (var-get (find-var 'spring-lobby/file-events-chimer-fn))]
-        (alter-var-root #'file-events-chimer (fn [& _] (chimer-fn *state))))
-      (catch Exception e
-        (println "error starting file events" e)))
+    (future
+      (when hawk
+        (try
+          (hawk/stop! hawk)
+          (catch Exception e
+            (println "error stopping hawk" e))))
+      (try
+        (let [hawk-fn (var-get (find-var 'spring-lobby/add-hawk))]
+          (alter-var-root #'hawk (fn [& _] (hawk-fn *state))))
+        (catch Exception e
+          (println "error starting hawk" e))))
+    (future
+      (when tasks-chimer
+        (try
+          (tasks-chimer)
+          (catch Exception e
+            (println "error stopping tasks" e))))
+      (try
+        (let [chimer-fn (var-get (find-var 'spring-lobby/tasks-chimer-fn))]
+          (alter-var-root #'tasks-chimer (fn [& _] (chimer-fn *state))))
+        (catch Exception e
+          (println "error starting tasks" e))))
+    (future
+      (try
+        (let [chimer-fn (var-get (find-var 'spring-lobby/file-events-chimer-fn))]
+          (alter-var-root #'file-events-chimer (fn [& _] (chimer-fn *state))))
+        (catch Exception e
+          (println "error starting file events" e)))
+      (when file-events-chimer
+        (try
+          (file-events-chimer)
+          (catch Exception e
+            (println "error stopping file events" e)))))
     (if renderer
       (do
         (println "Re-rendering")
