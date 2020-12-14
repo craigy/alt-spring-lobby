@@ -1116,8 +1116,14 @@
 
 (defmethod event-handler ::desktop-browse-dir
   [{:keys [file]}]
-  (let [desktop (Desktop/getDesktop)]
-    (.browseFileDirectory desktop file)))
+  (if (fs/wsl-or-windows?)
+    (let [runtime (Runtime/getRuntime) ; TODO hacky?
+          command ["explorer.exe" (fs/wslpath file)]
+          ^"[Ljava.lang.String;" cmdarray (into-array String command)]
+      (log/info "Running" (pr-str command))
+      (.exec runtime cmdarray nil nil))
+    (let [desktop (Desktop/getDesktop)]
+      (.browseFileDirectory desktop file))))
 
 (defmethod event-handler ::show-importer [_e]
   (swap! *state assoc :show-importer true))
@@ -2330,11 +2336,9 @@
            copying drag-team engines extracting git-clone gitting http-download importables isolation-type
            map-input-prefix maps minimap-type rapid-data-by-version rapid-download users username]
     :as state}]
-  (let [{:keys [host-username battle-map]} (get battles (:battle-id battle))
+  (let [{:keys [host-username battle-map battle-modname]} (get battles (:battle-id battle))
         host-user (get users host-username)
         am-host (= username host-username)
-        {:keys [battle-map battle-modname]} (get battles (:battle-id battle))
-        ;mod-details (spring/mod-details mods battle-modname)
         scripttags (:scripttags battle)
         startpostype (->> scripttags
                           :game
@@ -3261,12 +3265,10 @@
                 (str " ( at " (.getAbsolutePath file) " )")))})
 
 (defn import-window
-  [{:keys [import-source-name importables show-importer] :as state}]
-  #p import-source-name
+  [{:keys [import-source-name importables show-importer]}]
   (let [import-source (->> import-sources
                            (filter (comp #{import-source-name} :import-source-name))
                            first)]
-    #p import-source
     {:fx/type :stage
      :x 400
      :y 400
@@ -3347,7 +3349,7 @@
                  :cell-value-factory identity
                  :cell-factory
                  {:fx/cell-type :table-cell
-                  :describe (fn [i] {:text "TODO Import buttons"})}}]}]
+                  :describe (fn [_i] {:text "TODO Import buttons"})}}]}]
              [{:fx/type :label
                :text "Nothing to import"}])))}}}))
 
