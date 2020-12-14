@@ -112,6 +112,9 @@
 (defn spring-executable []
   (executable "spring"))
 
+(defn spring-headless-executable []
+  (executable "spring-headless"))
+
 
 (defn bar-root
   "Returns the root directory for BAR"
@@ -313,7 +316,7 @@
 
 
 (defn sync-version [engine-dir]
-  (let [engine-exe (io/file engine-dir (spring-executable))
+  (let [engine-exe (io/file engine-dir (spring-headless-executable))
         _ (.setExecutable engine-exe true)
         command [(.getAbsolutePath engine-exe) "--sync-version"]
         ^"[Ljava.lang.String;" cmdarray (into-array String command)
