@@ -484,6 +484,7 @@
           engine-dir (some->> engines
                               (filter (comp #{battle-version} :engine-version))
                               first
+                              :absolute-path
                               io/file)
           engine-file (io/file engine-dir (fs/spring-executable))
           _ (log/info "Engine executable" engine-file)

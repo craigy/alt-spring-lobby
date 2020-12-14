@@ -200,6 +200,13 @@
     mod-data))
 
 
+(defn mod-name-sans-git [mod-name]
+  (when mod-name
+    (when-let [[_all mod-prefix _git] (re-find #"(.+)\s([0-9a-f]+)$" mod-name)]
+      mod-prefix
+      mod-name)))
+
+
 (defn add-watchers
   "Adds all *state watchers."
   [state-atom]
@@ -240,13 +247,21 @@
         (let [old-battle-id (-> old-state :battle :battle-id)
               new-battle-id (-> new-state :battle :battle-id)
               old-battle-mod (-> old-state :battles (get old-battle-id) :battle-modname)
-              new-battle-mod (-> new-state :battles (get new-battle-id) :battle-modname)]
+              new-battle-mod (-> new-state :battles (get new-battle-id) :battle-modname)
+              new-battle-mod-sans-git (mod-name-sans-git new-battle-mod)
+              mod-name-set (set [new-battle-mod new-battle-mod-sans-git])
+              filter-fn (comp mod-name-set mod-name-sans-git :mod-name)]
           (when (or (not= old-battle-id new-battle-id)
-                    (not= old-battle-mod new-battle-mod))
+                    (not= old-battle-mod new-battle-mod)
+                    (and new-battle-mod
+                         (not (:battle-mod-details new-state))
+                         (->> new-state :mods
+                              (filter filter-fn)
+                              first)))
             (log/debug "Updating battle mod details for" new-battle-mod "was" old-battle-mod)
             (when-let [mod-details (some->> new-state
                                             :mods
-                                            (filter (comp #{new-battle-mod} :mod-name))
+                                            (filter filter-fn)
                                             first
                                             :absolute-path
                                             io/file
