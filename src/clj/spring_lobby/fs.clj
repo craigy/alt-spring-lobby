@@ -322,6 +322,12 @@
       sync-version)))
 
 
+(defn engines-dir
+  ([]
+   (engines-dir (isolation-dir)))
+  ([root]
+   (io/file root "engine")))
+
 (defn engine-dirs
   ([]
    (engine-dirs (isolation-dir)))
@@ -346,12 +352,18 @@
     (slurp (.getInputStream zip-file entry))))
 
 
+(defn mods-dir
+  ([]
+   (mods-dir (isolation-dir)))
+  ([root]
+   (io/file root "games")))
+
 (defn mod-file
   ([mod-filename]
    (mod-file (isolation-dir) mod-filename))
   ([root mod-filename]
    (when mod-filename
-     (io/file root "games" mod-filename))))
+     (io/file (mods-dir root) mod-filename))))
 
 (defn mod-files
   ([]
@@ -432,12 +444,18 @@
       (string/lower-case (string/replace map-name #"\s" "_"))
       ".sd7")))
 
+(defn maps-dir
+  ([]
+   (maps-dir (isolation-dir)))
+  ([root]
+   (io/file root "maps")))
+
 (defn map-file
   ([map-filename]
    (map-file (isolation-dir) map-filename))
   ([root map-filename]
    (when map-filename
-     (io/file root "maps" map-filename))))
+     (io/file (maps-dir root) map-filename))))
 
 (defn spring-config-line [lines field]
   (nth

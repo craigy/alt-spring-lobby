@@ -85,11 +85,14 @@
     (clojure.java.io/copy (clojure.java.io/input-stream x) out)
     (.toByteArray out)))
 
-(defn slurp-bytes-from-pool [md5]
-  (let [f (file-in-pool md5)]
-    (with-open [is (io/input-stream f)
-                gz (GZIPInputStream. is)]
-      (slurp-bytes gz))))
+(defn slurp-bytes-from-pool
+  ([md5]
+   (slurp-bytes-from-pool (fs/isolation-dir) md5))
+  ([root md5]
+   (let [f (file-in-pool root md5)]
+     (with-open [is (io/input-stream f)
+                 gz (GZIPInputStream. is)]
+       (slurp-bytes gz)))))
 
 (defn inner
   ([decoded-sdp inner-filename]
@@ -100,8 +103,8 @@
                                (filter (comp #{inner-filename} :filename))
                                first)]
      (assoc inner-details
-            :contents (slurp-from-pool root (:md5 inner-details))
-            :content-bytes (slurp-bytes-from-pool (:md5 inner-details)))
+            ;:contents (slurp-from-pool root (:md5 inner-details))
+            :content-bytes (slurp-bytes-from-pool root (:md5 inner-details)))
      (log/warn "No such inner rapid file"
                (pr-str {:package (::source decoded-sdp)
                         :inner-filename inner-filename})))))

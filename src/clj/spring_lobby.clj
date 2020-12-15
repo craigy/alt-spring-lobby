@@ -148,6 +148,10 @@
     [:engine-versions-cache :map-files-cache
      :engine-branch :maps-index-url :rapid-repo :mods-index-url]))
 
+(defn select-importables [state]
+  (select-keys state
+    [:importables-by-path]))
+
 
 (defn safe-read-map-cache [map-name]
   (log/info "Reading map cache for" (str "'" map-name "'"))
@@ -177,6 +181,9 @@
            (fs/read-mod-file f opts))
          mod-name (spring/mod-name mod-data)]
      (assoc mod-data :mod-name mod-name))))
+
+#_
+(read-mod-data (io/file "/mnt/c/Users/craig/AppData/Local/Programs/Beyond-All-Reason/data/packages/ce1411570bf8ed64222a1ee241a22234.sdp"))
 
 (defn update-mod [state-atom file]
   (let [mod-data (read-mod-data file {:modinfo-only false})
@@ -255,6 +262,7 @@
   (remove-watch state-atom :engines)
   (remove-watch state-atom :mods)
   (remove-watch state-atom :download)
+  (remove-watch state-atom :importables)
   (remove-watch state-atom :battle-map-details)
   (remove-watch state-atom :battle-mod-details)
   (remove-watch state-atom :fix-missing-resource)
@@ -263,6 +271,7 @@
   (add-watch-state-to-edn state-atom :engines select-engines "engines.edn")
   (add-watch-state-to-edn state-atom :mods select-mods "mods.edn")
   (add-watch-state-to-edn state-atom :download select-download "download.edn")
+  (add-watch-state-to-edn state-atom :importables select-importables "importables.edn")
   (add-watch state-atom :battle-map-details
     (fn [_k _ref old-state new-state]
       (try
@@ -340,8 +349,10 @@
 
 (defn add-hawk! [state-atom]
   (log/info "Adding hawk file watcher")
-  (hawk/watch! {:watcher :polling
-                :sensitivity :low} ;:medium} ;:high} ;:low}
+  (hawk/watch!
+    #_ ; TODO look into alternatives for file watching
+    {:watcher :polling
+     :sensitivity :low} ;:medium} ;:high} ;:low}
     [{:paths [(fs/download-dir)
               (fs/isolation-dir)
               (fs/spring-root)]
@@ -990,10 +1001,12 @@
                 max-players 8
                 rank 0
                 engine "Spring"}}]
+  (swap! *state assoc :battle {})
   (message/send-message client
     (str "OPENBATTLE " battle-type " " nat-type " " battle-password " " host-port " " max-players
          " " mod-hash " " rank " " map-hash " " engine "\t" engine-version "\t" map-name "\t" title
          "\t" mod-name)))
+
 
 (defmethod event-handler ::host-battle
   [{:keys [client scripttags host-battle-state]}]
@@ -1673,7 +1686,7 @@
       :-fx-background-color error-red}})
 
 (defn resource-sync-pane
-  [{:keys [delete-action issues refresh-action resource]}]
+  [{:keys [browse-action delete-action issues refresh-action resource]}]
   (let [worst-severity (reduce
                          (fn [worst {:keys [severity]}]
                            (max worst severity))
@@ -1731,7 +1744,23 @@
                 :-fx-background-color "black"}
                :graphic
                {:fx/type font-icon/lifecycle
-                :icon-literal "mdi-delete:16:white"}}]))}]
+                :icon-literal "mdi-delete:16:white"}}])
+           (when browse-action
+             [{:fx/type :button
+               :on-action browse-action
+               :tooltip
+               {:fx/type :tooltip
+                :show-delay [10 :ms]
+                :style {:-fx-font-size 14}
+                :text "Browse this resource"}
+               :h-box/margin 4
+               :style
+               {:-fx-base "black"
+                :-fx-background "black"
+                :-fx-background-color "black"}
+               :graphic
+               {:fx/type font-icon/lifecycle
+                :icon-literal "mdi-folder:16:white"}}]))}]
        (map
          (fn [{:keys [action in-progress human-text severity text tooltip]}]
            (let [font-style {:-fx-font-size 12}
@@ -2500,111 +2529,114 @@
                 :icon-literal "mdi-nuke:32:white"}}]}
             {:fx/type :h-box
              :children
-             [{:fx/type resource-sync-pane
-               :h-box/margin 8
-               :resource "Map" ;battle-map ; (str "map (" battle-map ")")
-               ;:delete-action {:event/type ::delete-map}
-               :refresh-action {:event/type ::force-update-battle-map}
-               :issues
-               (let [
-                     map-filename (:filename battle-map-details)
-                     map-download-file nil ; TODO
-                     map-isolation-file (spring/map-isolation-file      ; needs to be read from maps
-                                          map-filename engine-version) ; TODO allow different names
-                     importable (some->> importables-by-path
-                                         vals
-                                         (filter (comp #{::map} :resource-type))
-                                         (filter (comp #{battle-map} :resource-name))
-                                         first)]
-                 (concat
-                   (let [url (http/map-url battle-map) ; TODO this is only a guess
-                         download (get http-download url)
-                         in-progress (:running download)
-                         text (or (when in-progress (:message download))
-                                  "download")
-                         severity (if battle-map-details 0 2)]
-                     [{:severity severity
-                       :text text
-                       :human-text (if (zero? severity)
-                                     (:map-name battle-map-details)
-                                     (str "Download map " (:map-name battle-map-details))) ; TODO filename
-                       :tooltip (if (zero? severity)
-                                  map-filename ; TODO map absolute path here
-                                  (str "Download from " url))
-                       :in-progress in-progress
-                       :action {:event/type ::download-map
-                                :map-name battle-map}}])
-                   (when (and map-download-file
-                              (.exists map-download-file) ; FIXME IO IN RENDER
-                              (not battle-map-details))
-                     (let [in-progress (-> copying (get map-filename) :status)]
-                       [{:severity 2
-                         :text "copy"
-                         :human-text "Copy map from downloads"
-                         :tooltip (str "Copy from" map-download-file " to " map-isolation-file)
+             [(let [map-filename (:filename battle-map-details)
+                    map-isolation-file (spring/map-isolation-file      ; needs to be read from maps
+                                         map-filename engine-version)] ; TODO allow different names
+                {:fx/type resource-sync-pane
+                 :h-box/margin 8
+                 :resource "Map" ;battle-map ; (str "map (" battle-map ")")
+                 ;:delete-action {:event/type ::delete-map}
+                 :browse-action {:event/type ::desktop-browse-dir
+                                 :file (or map-isolation-file (fs/maps-dir))}
+                 :refresh-action {:event/type ::force-update-battle-map}
+                 :issues
+                 (let [map-download-file nil ; TODO
+                       importable (some->> importables-by-path
+                                           vals
+                                           (filter (comp #{::map} :resource-type))
+                                           (filter (comp #{battle-map} :resource-name))
+                                           first)]
+                   (concat
+                     (let [url (http/map-url battle-map) ; TODO this is only a guess
+                           download (get http-download url)
+                           in-progress (:running download)
+                           text (or (when in-progress (:message download))
+                                    "download")
+                           severity (if battle-map-details 0 2)]
+                       [{:severity severity
+                         :text text
+                         :human-text (if (zero? severity)
+                                       (:map-name battle-map-details)
+                                       (str "Download map " (:map-name battle-map-details))) ; TODO filename
+                         :tooltip (if (zero? severity)
+                                    map-filename ; TODO map absolute path here
+                                    (str "Download from " url))
                          :in-progress in-progress
-                         :action {:event/type ::copy-map
-                                  :map-filename map-filename
-                                  :engine-version engine-version}}]))
-                   (when (and (not battle-map-details)
-                              importable)
-                     (when-let [resource-file (:resource-file importable)]
-                       (let [absolute-path (.getAbsolutePath resource-file)]
+                         :action {:event/type ::download-map
+                                  :map-name battle-map}}])
+                     (when (and map-download-file
+                                (.exists map-download-file) ; FIXME IO IN RENDER
+                                (not battle-map-details))
+                       (let [in-progress (-> copying (get map-filename) :status)]
+                         [{:severity 2
+                           :text "copy"
+                           :human-text "Copy map from downloads"
+                           :tooltip (str "Copy from" map-download-file " to " map-isolation-file)
+                           :in-progress in-progress
+                           :action {:event/type ::copy-map
+                                    :map-filename map-filename
+                                    :engine-version engine-version}}]))
+                     (when (and (not battle-map-details)
+                                importable)
+                       (when-let [resource-file (:resource-file importable)]
+                         (let [absolute-path (.getAbsolutePath resource-file)]
+                           [{:severity 2
+                             :text "import"
+                             :human-text (str "Import from " (:import-source-name importable))
+                             :tooltip (str "Copy map archive from " absolute-path)
+                             :in-progress (-> copying (get absolute-path) :status)
+                             :action {:event/type ::copy-file
+                                      :source resource-file
+                                      :dest (fs/map-file (.getName resource-file))}}])))))})
+              (let [absolute-path (:absolute-path battle-mod-details)
+                    mod-file (when absolute-path (io/file absolute-path))]
+                {:fx/type resource-sync-pane
+                 :h-box/margin 8
+                 :resource "Game" ;battle-modname ; (str "game (" battle-modname ")")
+                 ;:delete-action {:event/type ::delete-mod}
+                 :browse-action {:event/type ::desktop-browse-dir
+                                 :file (or mod-file (fs/mods-dir))}
+                 :refresh-action {:event/type ::force-update-battle-mod}
+                 :issues
+                 (concat
+                   (let [git-url (cond
+                                   (string/starts-with? battle-modname "Beyond All Reason")
+                                   git/bar-repo-url
+                                   (string/starts-with? battle-modname "Balanced Annihilation")
+                                   git/ba-repo-url)
+                         rapid-id (:id (get rapid-data-by-version battle-modname))
+                         in-progress (or (-> rapid-download (get rapid-id) :running)
+                                         (-> git-clone (get git-url) :status))
+                         download-via :todo]
+                     [{:severity (if battle-mod-details 0 2)
+                       :text "download"
+                       :human-text (if battle-mod-details
+                                     (:mod-name battle-mod-details)
+                                     (str "Download using" download-via))
+                       :in-progress in-progress
+                       :tooltip (str "Located at " absolute-path)
+                       :action {:event/type ::download-mod
+                                :mod-name battle-modname
+                                :rapid-id rapid-id
+                                :git-url git-url
+                                :engine-dir-filename (spring/engine-dir-filename engines engine-version)}}])
+                   (when-not battle-mod-details
+                     (when-let [importable (some->> importables-by-path
+                                                    vals
+                                                    (filter (comp #{::mod} :resource-type))
+                                                    (filter (comp #{battle-modname} :resource-name))
+                                                    first)]
+                       (let [resource-file (:resource-file importable)]
                          [{:severity 2
                            :text "import"
-                           :human-text (str "Import from " (:import-source-name importable))
-                           :tooltip (str "Copy map archive from " absolute-path)
-                           :in-progress (-> copying (get absolute-path) :status)
+                           :human-text (str "Import from" resource-file)
+                           :tooltip (str "Copy game dir from" (:import-source-name importable)
+                                         " at " resource-file)
+                           :in-progress (get copying resource-file)
                            :action {:event/type ::copy-file
                                     :source resource-file
-                                    :dest (fs/map-file (.getName resource-file))}}])))))}
-              {:fx/type resource-sync-pane
-               :h-box/margin 8
-               :resource "Game" ;battle-modname ; (str "game (" battle-modname ")")
-               ;:delete-action {:event/type ::delete-mod}
-               :refresh-action {:event/type ::force-update-battle-mod}
-               :issues
-               (concat
-                 (let [git-url (cond
-                                 (string/starts-with? battle-modname "Beyond All Reason")
-                                 git/bar-repo-url
-                                 (string/starts-with? battle-modname "Balanced Annihilation")
-                                 git/ba-repo-url)
-                       rapid-id (:id (get rapid-data-by-version battle-modname))
-                       in-progress (or (-> rapid-download (get rapid-id) :running)
-                                       (-> git-clone (get git-url) :status))
-                       download-via :todo]
-                   [{:severity (if battle-mod-details 0 2)
-                     :text "download"
-                     :human-text (if battle-mod-details
-                                   (:mod-name battle-mod-details)
-                                   (str "Download using" download-via))
-                     :in-progress in-progress
-                     :tooltip (str "Located at " (:absolute-path battle-mod-details))
-                     :action {:event/type ::download-mod
-                              :mod-name battle-modname
-                              :rapid-id rapid-id
-                              :git-url git-url
-                              :engine-dir-filename (spring/engine-dir-filename engines engine-version)}}])
-                 (when-not battle-mod-details
-                   (when-let [importable (some->> importables-by-path
-                                                  vals
-                                                  (filter (comp #{::mod} :resource-type))
-                                                  (filter (comp #{battle-modname} :resource-name))
-                                                  first)]
-                     (let [resource-file (:resource-file importable)]
-                       [{:severity 2
-                         :text "import"
-                         :human-text (str "Import from" resource-file)
-                         :tooltip (str "Copy game dir from" (:import-source-name importable)
-                                       " at " resource-file)
-                         :in-progress (get copying resource-file)
-                         :action {:event/type ::copy-file
-                                  :source resource-file
-                                  :dest (fs/mod-file (.getName resource-file))}}])))
-                 (when-not battle-mod-details
-                   (when-let [mod-file (when-let [absolute-path (:absolute-path battle-mod-details)]
-                                         (io/file absolute-path))]
+                                    :dest (fs/mod-file (.getName resource-file))}}])))
+                   (when (and (not battle-mod-details) mod-file)
                      (let [in-progress (-> copying (get (:filename battle-mod-details)) :status)]
                        [{:severity (if (and (.exists mod-file)
                                             (not in-progress))
@@ -2613,36 +2645,38 @@
                          :in-progress in-progress
                          :action {:event/type ::copy-mod
                                   :mod-details battle-mod-details
-                                  :engine-version engine-version}}])))
-                 (when (and (= :directory
-                               (::fs/source battle-mod-details)))
-                   (let [battle-mod-git-ref (mod-git-ref battle-modname)
-                         severity (if (= battle-modname
-                                         (:mod-name battle-mod-details))
-                                    0 1)
-                         absolute-path (:absolute-path battle-mod-details)]
-                     [(merge
-                        {:severity severity
-                         :text "git"
-                         :in-progress (get gitting absolute-path)}
-                        (if (= battle-mod-git-ref "$VERSION")
-                          ; unspecified git commit     ^
-                          {:human-text (str "Unspecified git ref " battle-mod-git-ref)
-                           :tooltip (str "SpringLobby does not specify version, "
-                                         "yours may not be compatible")}
-                          {:human-text (if (zero? severity)
-                                         (str "git at ref " battle-mod-git-ref)
-                                         (str "Reset git to ref " battle-mod-git-ref))
-                           :action
-                           {:event/type ::git-mod
-                            :absolute-path absolute-path
-                            :battle-mod-git-ref battle-mod-git-ref}}))])))}
+                                  :engine-version engine-version}}]))
+                   (when (and (= :directory
+                                 (::fs/source battle-mod-details)))
+                     (let [battle-mod-git-ref (mod-git-ref battle-modname)
+                           severity (if (= battle-modname
+                                           (:mod-name battle-mod-details))
+                                      0 1)]
+                       [(merge
+                          {:severity severity
+                           :text "git"
+                           :in-progress (-> gitting (get absolute-path) :status)}
+                          (if (= battle-mod-git-ref "$VERSION")
+                            ; unspecified git commit ^
+                            {:human-text (str "Unspecified git ref " battle-mod-git-ref)
+                             :tooltip (str "SpringLobby does not specify version, "
+                                           "yours may not be compatible")}
+                            {:human-text (if (zero? severity)
+                                           (str "git at ref " battle-mod-git-ref)
+                                           (str "Reset git to ref " battle-mod-git-ref))
+                             :action
+                             {:event/type ::git-mod
+                              :absolute-path absolute-path
+                              :battle-mod-git-ref battle-mod-git-ref}}))])))})
               {:fx/type resource-sync-pane
                :h-box/margin 8
                :resource "Engine" ; engine-version ; (str "engine (" engine-version ")")
-               :delete-action {:event/type ::delete-engine
-                               :engines engines
-                               :engine-version engine-version}
+               ;:delete-action {:event/type ::delete-engine
+               ;                :engines engines
+               ;                :engine-version engine-version
+               :browse-action {:event/type ::desktop-browse-dir
+                               :file (or engine-dir-file
+                                         (fs/engines-dir))}
                :issues
                (if (and (not (.exists engine-download-file)) ; FIXME IO IN RENDER
                         (or (not engine-dir-file)
@@ -3329,7 +3363,8 @@
                               ::engine (:engine-version (fs/engine-data resource-file))
                               ::sdp (:mod-name (read-mod-data resource-file)))]
           (swap! *state update-in [:importables-by-path (.getAbsolutePath resource-file)]
-                 assoc :resource-name resource-name)
+                 assoc :resource-name resource-name
+                 :resource-updated (u/curr-millis))
           (Thread/sleep 100))
         (catch Exception e
           (log/error e "Error reading importable" importable))))))
@@ -3861,6 +3896,7 @@
 ; TODO remove and delay most of this stuff
 (defn root-on-created [& args]
   (log/trace "on-created" args)
+  #_
   (doseq [import-source import-sources]
     (add-task! *state (merge
                         {::task-type ::scan-imports}
@@ -3980,16 +4016,27 @@
                  [:battle :battle-password :battle-title :battles :client :engines :engine-filter
                   :engine-version :map-input-prefix :map-name :maps :mod-filter :mod-name :mods
                   :pop-out-battle :scripttags :selected-battle]))]
-            (when (and battle (not pop-out-battle))
-              [(merge
-                 {:fx/type battle-view}
-                 (select-keys state
-                   [:archiving :battles :battle :battle-map-details :battle-mod-details :bot-name
-                    :bot-username :bot-version :cleaning :copying :drag-team :engine-version
-                    :engines :extracting :git-clone :gitting :http-download :importables-by-path
-                    :isolation-type
-                    :map-input-prefix :maps :minimap-type :mods :rapid-data-by-version
-                    :rapid-download :username :users]))])
+            (when battle
+              (if (:battle-id battle)
+                (when (not pop-out-battle)
+                  [(merge
+                     {:fx/type battle-view}
+                     (select-keys state
+                       [:archiving :battles :battle :battle-map-details :battle-mod-details :bot-name
+                        :bot-username :bot-version :cleaning :copying :drag-team :engine-version
+                        :engines :extracting :git-clone :gitting :http-download :importables-by-path
+                        :isolation-type
+                        :map-input-prefix :maps :minimap-type :mods :rapid-data-by-version
+                        :rapid-download :username :users]))])
+                [{:fx/type :h-box
+                  :alignment :top-left
+                  :children
+                  [{:fx/type :v-box
+                    :h-box/hgrow :always
+                    :children
+                    [{:fx/type :label
+                      :style {:-fx-font-size 20}
+                      :text "Waiting for server to start battle..."}]}]}]))
             [{:fx/type :h-box
               :alignment :center-left
               :children
