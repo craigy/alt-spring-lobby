@@ -68,11 +68,14 @@
          pool-file (str (subs md5 2) ".gz")]
      (io/file root "pool" pool-dir pool-file))))
 
-(defn slurp-from-pool [md5]
-  (let [f (file-in-pool md5)]
-    (with-open [is (io/input-stream f)
-                gz (GZIPInputStream. is)]
-      (slurp gz))))
+(defn slurp-from-pool
+  ([md5]
+   (slurp-from-pool (fs/isolation-dir) md5))
+  ([root md5]
+   (let [f (file-in-pool root md5)]
+     (with-open [is (io/input-stream f)
+                 gz (GZIPInputStream. is)]
+       (slurp gz)))))
 
 ; https://clojuredocs.org/clojure.core/slurp
 (defn slurp-bytes
@@ -88,20 +91,36 @@
                 gz (GZIPInputStream. is)]
       (slurp-bytes gz))))
 
-(defn inner [decoded-sdp inner-filename]
-  (if-let [inner-details (->> decoded-sdp
-                              :items
-                              (filter (comp #{inner-filename} :filename))
-                              first)]
-    (assoc inner-details
-           :contents (slurp-from-pool (:md5 inner-details))
-           :content-bytes (slurp-bytes-from-pool (:md5 inner-details)))
-    (log/warn "No such inner rapid file"
-              (pr-str {:package (::source decoded-sdp)
-                       :inner-filename inner-filename}))))
+(defn inner
+  ([decoded-sdp inner-filename]
+   (inner (fs/isolation-dir) decoded-sdp inner-filename))
+  ([root decoded-sdp inner-filename]
+   (if-let [inner-details (->> decoded-sdp
+                               :items
+                               (filter (comp #{inner-filename} :filename))
+                               first)]
+     (assoc inner-details
+            :contents (slurp-from-pool root (:md5 inner-details))
+            :content-bytes (slurp-bytes-from-pool (:md5 inner-details)))
+     (log/warn "No such inner rapid file"
+               (pr-str {:package (::source decoded-sdp)
+                        :inner-filename inner-filename})))))
+
+(defn root-from-sdp
+  "Returns the spring root for the given sdp file."
+  [f]
+  (when-let [parent (.getParentFile f)] ; packages dir
+    (.getParentFile parent)))
+
+#_
+(root-from-sdp
+  (io/file "/mnt/c/Users/craig/AppData/Local/Programs/Beyond-All-Reason/data/packages/ce1411570bf8ed64222a1ee241a22234.sdp"))
 
 (defn rapid-inner [sdp-file inner-filename]
-  (inner (decode-sdp sdp-file) inner-filename))
+  (inner
+    (root-from-sdp sdp-file)
+    (decode-sdp sdp-file)
+    inner-filename))
 
 (defn sdp-hash [^java.io.File sdp-file]
   (-> (.getName sdp-file)

@@ -25,14 +25,8 @@
 (set! *warn-on-reflection* true)
 
 
-(def o (Object.))
-
-(future
-  (try
-    (locking o
-      (SevenZip/initSevenZipFromPlatformJAR))
-    (catch Exception e
-      (log/error e))))
+(defn init-7z! []
+  (SevenZip/initSevenZipFromPlatformJAR))
 
 
 (def config-filename "config.edn")
@@ -351,6 +345,13 @@
                   first)]
     (slurp (.getInputStream zip-file entry))))
 
+
+(defn mod-file
+  ([mod-filename]
+   (mod-file (isolation-dir) mod-filename))
+  ([root mod-filename]
+   (when mod-filename
+     (io/file root "games" mod-filename))))
 
 (defn mod-files
   ([]

@@ -340,7 +340,8 @@
 
 (defn add-hawk! [state-atom]
   (log/info "Adding hawk file watcher")
-  (hawk/watch!
+  (hawk/watch! {:watcher :polling
+                :sensitivity :low} ;:medium} ;:high} ;:low}
     [{:paths [(fs/download-dir)
               (fs/isolation-dir)
               (fs/spring-root)]
@@ -630,6 +631,34 @@
                   (remove (comp missing-filenames :filename))
                   set)))
     {:todo-count (count todo)}))
+
+(defn force-update-battle-map
+  ([]
+   (force-update-battle-map *state))
+  ([state-atom]
+   (reconcile-maps state-atom)
+   (let [{:keys [battle battles maps]} @state-atom
+         battle-id (:battle-id battle)
+         battle-map (-> battles (get battle-id) :battle-map)
+         _ (log/debug "Force updating battle map details for" battle-map)
+         filter-fn (comp #{battle-map} :map-name)
+         map-details (some->> maps
+                              (filter filter-fn)
+                              first
+                              :absolute-path
+                              io/file
+                              fs/read-map-data)]
+     (swap! *state assoc :battle-map-details map-details)
+     map-details)))
+
+(defmethod task-handler ::reconcile-engines [_]
+  (reconcile-engines *state))
+
+(defmethod task-handler ::reconcile-mods [_]
+  (reconcile-mods *state))
+
+(defmethod task-handler ::reconcile-maps [_]
+  (reconcile-maps *state))
 
 
 (defmethod task-handler ::update-map
@@ -1736,13 +1765,28 @@
                  :children
                  [{:fx/type :button
                    :v-box/margin 8
-                   :text (str text " " resource)
+                   :text display-text
                    :disable (boolean in-progress)
                    :on-action action}]})}))
          issues))}))
 
 
-(defmethod event-handler ::copy-map
+(defmethod event-handler ::copy-file
+  [{:keys [source dest] :as e}]
+  (if source
+    (do
+      (log/info "Copying from" source "to" dest)
+      (swap! *state assoc-in [:copying (.getAbsolutePath source)] {:status true})
+      (future
+        (try
+          (spring/java-nio-copy source dest) ; TODO move to fs
+          (catch Exception e
+            (log/error e "Error copying from" source "to" dest))
+          (finally
+            (swap! *state assoc-in [:copying (.getAbsolutePath source)] {:status false})))))
+    (log/warn "No source to copy for event" e)))
+
+(defmethod event-handler ::copy-map ; TODO duplicate of ::copy-file ?
   [{:keys [map-filename engine-version]}]
   (log/info "Copying map" map-filename "to" engine-version)
   (swap! *state assoc-in [:copying map-filename] {:status true})
@@ -1754,7 +1798,7 @@
       (finally
         (swap! *state assoc-in [:copying map-filename] {:status false})))))
 
-(defmethod event-handler ::import-map
+(defmethod event-handler ::import-map ; TODO duplicate of ::copy-file ?
   [{:keys [source dest]}]
   (when source
     (let [filename (.getName source)
@@ -1769,7 +1813,7 @@
           (finally
             (swap! *state assoc-in [:copying filename] {:status false})))))))
 
-(defmethod event-handler ::copy-mod
+(defmethod event-handler ::copy-mod ; TODO duplicate of ::copy-file ?
   [{:keys [mod-details engine-version]}]
   (let [mod-filename (:filename mod-details)]
     (log/info "Copying mod" mod-filename "to" engine-version)
@@ -1783,20 +1827,19 @@
           (swap! *state assoc-in [:copying mod-filename] {:status false}))))))
 
 (defmethod event-handler ::git-mod
-  [{:keys [battle-mod-git-ref mod-details]}]
-  (let [{:keys [absolute-path]} mod-details]
-    (when (and absolute-path battle-mod-git-ref)
-      (log/info "Checking out mod" absolute-path "to" battle-mod-git-ref)
-      (swap! *state assoc-in [:gitting absolute-path] {:status true})
-      (future
-        (try
-          (git/fetch (io/file absolute-path))
-          (git/reset-hard (io/file absolute-path) battle-mod-git-ref)
-          (reconcile-mods *state)
-          (catch Exception e
-            (log/error e "Error during git reset" absolute-path "to" battle-mod-git-ref))
-          (finally
-            (swap! *state assoc-in [:gitting absolute-path] {:status false})))))))
+  [{:keys [battle-mod-git-ref absolute-path]}]
+  (when (and absolute-path battle-mod-git-ref)
+    (log/info "Checking out mod" absolute-path "to" battle-mod-git-ref)
+    (swap! *state assoc-in [:gitting absolute-path] {:status true})
+    (future
+      (try
+        (git/fetch (io/file absolute-path))
+        (git/reset-hard (io/file absolute-path) battle-mod-git-ref)
+        (reconcile-mods *state)
+        (catch Exception e
+          (log/error e "Error during git reset" absolute-path "to" battle-mod-git-ref))
+        (finally
+          (swap! *state assoc-in [:gitting absolute-path] {:status false}))))))
 
 (defmethod event-handler ::archive-mod
   [{:keys [mod-details engine-version]}]
@@ -2296,6 +2339,10 @@
 (defmethod event-handler ::isolation-type-change [{:fx/keys [event]}]
   (log/info event))
 
+(defmethod event-handler ::force-update-battle-map [{:fx/keys [event]}]
+  (log/info event)
+  (force-update-battle-map *state))
+
 (defmethod event-handler ::delete-map [{:fx/keys [event]}]
   (log/info event))
 
@@ -2331,9 +2378,16 @@
 #_
 (-> user/*state deref :battle-map-details keys)
 
+#_
+(->> user/*state deref :importables-by-path
+     vals
+     ;(filter (comp #{::map} :resource-type))
+     (filter (comp #{"Claymore_v2"} :resource-name)))
+
 (defn battle-view
   [{:keys [battle battles battle-map-details battle-mod-details bot-name bot-username bot-version
-           copying drag-team engines extracting git-clone gitting http-download importables isolation-type
+           copying drag-team engines extracting git-clone gitting http-download importables-by-path
+           isolation-type
            map-input-prefix maps minimap-type rapid-data-by-version rapid-download users username]
     :as state}]
   (let [{:keys [host-username battle-map battle-modname]} (get battles (:battle-id battle))
@@ -2450,13 +2504,15 @@
                :h-box/margin 8
                :resource "Map" ;battle-map ; (str "map (" battle-map ")")
                ;:delete-action {:event/type ::delete-map}
+               :refresh-action {:event/type ::force-update-battle-map}
                :issues
                (let [
                      map-filename (:filename battle-map-details)
                      map-download-file nil ; TODO
                      map-isolation-file (spring/map-isolation-file      ; needs to be read from maps
                                           map-filename engine-version) ; TODO allow different names
-                     importable (some->> importables ; TODO import option
+                     importable (some->> importables-by-path
+                                         vals
                                          (filter (comp #{::map} :resource-type))
                                          (filter (comp #{battle-map} :resource-name))
                                          first)]
@@ -2492,13 +2548,16 @@
                                   :engine-version engine-version}}]))
                    (when (and (not battle-map-details)
                               importable)
-                     [{:severity 2
-                       :text "import"
-                       :human-text (str "Import from " (:import-source-name importable))
-                       :tooltip (str "Import from " (:import-file importable))
-                       :in-progress (-> copying (get map-filename) :status)
-                       :action {:event/type ::import-map
-                                :imoprtable importable}}])))}
+                     (when-let [resource-file (:resource-file importable)]
+                       (let [absolute-path (.getAbsolutePath resource-file)]
+                         [{:severity 2
+                           :text "import"
+                           :human-text (str "Import from " (:import-source-name importable))
+                           :tooltip (str "Copy map archive from " absolute-path)
+                           :in-progress (-> copying (get absolute-path) :status)
+                           :action {:event/type ::copy-file
+                                    :source resource-file
+                                    :dest (fs/map-file (.getName resource-file))}}])))))}
               {:fx/type resource-sync-pane
                :h-box/margin 8
                :resource "Game" ;battle-modname ; (str "game (" battle-modname ")")
@@ -2527,51 +2586,57 @@
                               :rapid-id rapid-id
                               :git-url git-url
                               :engine-dir-filename (spring/engine-dir-filename engines engine-version)}}])
-                 #_
-                 (if-let [mod-file (when-let [absolute-path (:absolute-path battle-mod-details)]
-                                     (io/file absolute-path))]
-                   (let [in-progress (-> archiving (get (:filename battle-mod-details)) :status)]
-                     [{:severity (if (and (.exists mod-isolation-archive-file)
-                                          (not in-progress))
-                                   0 1)
-                       :text "archive"
-                       :in-progress in-progress
-                       :action {:event/type ::archive-mod
-                                :mod-details battle-mod-details
-                                :engine-version engine-version}}]))
-                 (when-let [mod-file (when-let [absolute-path (:absolute-path battle-mod-details)]
-                                       (io/file absolute-path))]
-                   (let [in-progress (-> copying (get (:filename battle-mod-details)) :status)]
-                     [{:severity (if (and (.exists mod-file)
-                                          (not in-progress))
-                                   0 1)
-                       :text "copy"
-                       :in-progress in-progress
-                       :action {:event/type ::copy-mod
-                                :mod-details battle-mod-details
-                                :engine-version engine-version}}])
-                   (when (and (= :directory
-                                 (::fs/source battle-mod-details)))
-                     (let [battle-mod-git-ref (mod-git-ref battle-modname)
-                           severity (if (= battle-modname
-                                           (:mod-name battle-mod-details))
-                                      0 1)
-                           absolute-path (:absolute-path battle-mod-details)]
-                       [(merge
-                          {:severity severity
-                           :text "git"
-                           :in-progress (get gitting absolute-path)}
-                          (if-not (= battle-mod-git-ref "$VERSION")
-                            ; unspecified git commit     ^
-                            {:human-text (if (zero? severity)
-                                           (str "git at ref " battle-mod-git-ref)
-                                           (str "Reset git to ref " battle-mod-git-ref))
-                             :action
-                             {:event/type ::git-mod
-                              :mod-details battle-mod-details
-                              :battle-mod-git-ref battle-mod-git-ref}}
-                            {:human-text (str "Unspecified git ref " battle-mod-git-ref)
-                             :tooltip "SpringLobby does not specify version, yours may not be compatible"}))]))))}
+                 (when-not battle-mod-details
+                   (when-let [importable (some->> importables-by-path
+                                                  vals
+                                                  (filter (comp #{::mod} :resource-type))
+                                                  (filter (comp #{battle-modname} :resource-name))
+                                                  first)]
+                     (let [resource-file (:resource-file importable)]
+                       [{:severity 2
+                         :text "import"
+                         :human-text (str "Import from" resource-file)
+                         :tooltip (str "Copy game dir from" (:import-source-name importable)
+                                       " at " resource-file)
+                         :in-progress (get copying resource-file)
+                         :action {:event/type ::copy-file
+                                  :source resource-file
+                                  :dest (fs/mod-file (.getName resource-file))}}])))
+                 (when-not battle-mod-details
+                   (when-let [mod-file (when-let [absolute-path (:absolute-path battle-mod-details)]
+                                         (io/file absolute-path))]
+                     (let [in-progress (-> copying (get (:filename battle-mod-details)) :status)]
+                       [{:severity (if (and (.exists mod-file)
+                                            (not in-progress))
+                                     0 1)
+                         :text "copy"
+                         :in-progress in-progress
+                         :action {:event/type ::copy-mod
+                                  :mod-details battle-mod-details
+                                  :engine-version engine-version}}])))
+                 (when (and (= :directory
+                               (::fs/source battle-mod-details)))
+                   (let [battle-mod-git-ref (mod-git-ref battle-modname)
+                         severity (if (= battle-modname
+                                         (:mod-name battle-mod-details))
+                                    0 1)
+                         absolute-path (:absolute-path battle-mod-details)]
+                     [(merge
+                        {:severity severity
+                         :text "git"
+                         :in-progress (get gitting absolute-path)}
+                        (if (= battle-mod-git-ref "$VERSION")
+                          ; unspecified git commit     ^
+                          {:human-text (str "Unspecified git ref " battle-mod-git-ref)
+                           :tooltip (str "SpringLobby does not specify version, "
+                                         "yours may not be compatible")}
+                          {:human-text (if (zero? severity)
+                                         (str "git at ref " battle-mod-git-ref)
+                                         (str "Reset git to ref " battle-mod-git-ref))
+                           :action
+                           {:event/type ::git-mod
+                            :absolute-path absolute-path
+                            :battle-mod-git-ref battle-mod-git-ref}}))])))}
               {:fx/type resource-sync-pane
                :h-box/margin 8
                :resource "Engine" ; engine-version ; (str "engine (" engine-version ")")
@@ -2582,7 +2647,8 @@
                (if (and (not (.exists engine-download-file)) ; FIXME IO IN RENDER
                         (or (not engine-dir-file)
                             (not (.exists engine-dir-file)))) ; FIXME IO IN RENDER
-                 (if-let [importable (some->> importables ; TODO import option
+                 (if-let [importable (some->> importables-by-path
+                                              vals
                                               (filter (comp #{::engine} :resource-type))
                                               (filter (comp #{engine-version} :resource-name))
                                               first)]
@@ -3230,33 +3296,51 @@
         (swap! *state assoc-in [:extracting file] false)))))
 
 
-(defn import-type [t f]
+(defn import-type [t source f]
   {:resource-file f
-   :resource-type t})
+   :resource-type t
+   :import-source-name source})
 
 (defmethod task-handler ::scan-imports
-  [{root :file}]
+  [{root :file import-source-name :import-source-name}]
   (log/info "Scanning for possible imports from" root)
   (let [map-files (fs/map-files root)
         mod-files (fs/mod-files root)
         engine-dirs (fs/engine-dirs root)
         sdp-files (rapid/sdp-files root)
         importables (concat
-                      (map (partial import-type ::map) map-files)
-                      (map (partial import-type ::mod) mod-files)
-                      (map (partial import-type ::sdp) sdp-files)
-                      (map (partial import-type ::engine) engine-dirs))]
+                      (map (partial import-type ::map import-source-name) map-files)
+                      (map (partial import-type ::mod import-source-name) (concat mod-files sdp-files))
+                      (map (partial import-type ::engine import-source-name) engine-dirs))
+        importables-by-path (->> importables
+                                 (map (juxt #(.getAbsolutePath (:resource-file %)) identity))
+                                 (into {}))]
     (log/info "Found imports" {:map-files (count map-files)
                                :mod-files (count mod-files)
                                :engine-dirs (count engine-dirs)
                                :sdp-files (count sdp-files)})
-    (swap! *state assoc :importables importables)))
+    (swap! *state update :importables-by-path merge importables-by-path)
+    (doseq [{:keys [resource-file resource-type] :as importable} importables]
+      (try
+        (log/info "Finding name for importable" importable)
+        (let [resource-name (case resource-type
+                              ::map (:map-name (fs/read-map-data resource-file))
+                              ::mod (:mod-name (read-mod-data resource-file))
+                              ::engine (:engine-version (fs/engine-data resource-file))
+                              ::sdp (:mod-name (read-mod-data resource-file)))]
+          (swap! *state update-in [:importables-by-path (.getAbsolutePath resource-file)]
+                 assoc :resource-name resource-name)
+          (Thread/sleep 100))
+        (catch Exception e
+          (log/error e "Error reading importable" importable))))))
 
 (defmethod event-handler ::import-source-change
   [{:fx/keys [event]}]
   (swap! *state assoc :import-source-name (:import-source-name event))
+  #_
   (add-task! *state {::task-type ::scan-imports
-                     :file (:file event)}))
+                     :file (:file event)
+                     :import-source-name event}))
 
 (defn import-source-cell
   [{:keys [file import-source-name]}]
@@ -3265,7 +3349,7 @@
                 (str " ( at " (.getAbsolutePath file) " )")))})
 
 (defn import-window
-  [{:keys [import-source-name importables show-importer]}]
+  [{:keys [import-source-name importables-by-path show-importer]}]
   (let [import-source (->> import-sources
                            (filter (comp #{import-source-name} :import-source-name))
                            first)]
@@ -3285,73 +3369,68 @@
       :root
       {:fx/type :v-box
        :children
-       (concat
-         [{:fx/type :h-box
-           :alignment :center-left
-           :style {:-fx-font-size 16}
-           :children
-           (concat
-             [{:fx/type :label
-               :text " Import from: "}
-              {:fx/type :combo-box
-               :value import-source
-               :items import-sources
-               :button-cell import-source-cell
-               ;:placeholder {:import-source-name " < pick a source > "} TODO figure out placeholders
-               :cell-factory
-               {:fx/cell-type :list-cell
-                :describe import-source-cell}
-               :on-value-changed {:event/type ::import-source-change}
-               :tooltip {:fx/type :tooltip
-                         :show-delay [10 :ms]
-                         :text "Choose import source"}}]
-             (when import-source
-               [{:fx/type fx.ext.node/with-tooltip-props
-                 :props
-                 {:tooltip
-                  {:fx/type :tooltip
-                   :show-delay [10 :ms]
-                   :text "Open import source directory"}}
-                 :desc
-                 {:fx/type :button
-                  :on-action {:event/type ::desktop-browse-dir
-                              :file (:file import-source)}
-                  :graphic
-                  {:fx/type font-icon/lifecycle
-                   :icon-literal "mdi-folder:16:white"}}}]))}]
-         (when import-source
-           (if (seq importables)
-             [{:fx/type :table-view
-               :column-resize-policy :constrained ; TODO auto resize
-               :v-box/vgrow :always
-               :items importables
-               :columns
-               [{:fx/type :table-column
-                 :text "Type"
-                 :cell-value-factory identity
-                 :cell-factory
-                 {:fx/cell-type :table-cell
-                  :describe (fn [i] {:text (str (:resource-type i))})}}
-                {:fx/type :table-column
-                 :text "Name"
-                 :cell-value-factory identity
-                 :cell-factory
-                 {:fx/cell-type :table-cell
-                  :describe (fn [i] {:text (str (:resource-name i))})}}
-                {:fx/type :table-column
-                 :text "Path"
-                 :cell-value-factory identity
-                 :cell-factory
-                 {:fx/cell-type :table-cell
-                  :describe (fn [i] {:text (str (:resource-file i))})}}
-                {:fx/type :table-column
-                 :text "Import"
-                 :cell-value-factory identity
-                 :cell-factory
-                 {:fx/cell-type :table-cell
-                  :describe (fn [_i] {:text "TODO Import buttons"})}}]}]
-             [{:fx/type :label
-               :text "Nothing to import"}])))}}}))
+       [{:fx/type :h-box
+         :alignment :center-left
+         :style {:-fx-font-size 16}
+         :children
+         (concat
+           [{:fx/type :label
+             :text " Import from: "}
+            {:fx/type :combo-box
+             :value import-source
+             :items import-sources
+             :button-cell import-source-cell
+             ;:placeholder {:import-source-name " < pick a source > "} TODO figure out placeholders
+             :cell-factory
+             {:fx/cell-type :list-cell
+              :describe import-source-cell}
+             :on-value-changed {:event/type ::import-source-change}
+             :tooltip {:fx/type :tooltip
+                       :show-delay [10 :ms]
+                       :text "Choose import source"}}]
+           (when import-source
+             [{:fx/type fx.ext.node/with-tooltip-props
+               :props
+               {:tooltip
+                {:fx/type :tooltip
+                 :show-delay [10 :ms]
+                 :text "Open import source directory"}}
+               :desc
+               {:fx/type :button
+                :on-action {:event/type ::desktop-browse-dir
+                            :file (:file import-source)}
+                :graphic
+                {:fx/type font-icon/lifecycle
+                 :icon-literal "mdi-folder:16:white"}}}]))}
+        {:fx/type :table-view
+         :column-resize-policy :constrained ; TODO auto resize
+         :v-box/vgrow :always
+         :items (or (vals importables-by-path) [])
+         :columns
+         [{:fx/type :table-column
+           :text "Type"
+           :cell-value-factory identity
+           :cell-factory
+           {:fx/cell-type :table-cell
+            :describe (fn [i] {:text (str (:resource-type i))})}}
+          {:fx/type :table-column
+           :text "Name"
+           :cell-value-factory identity
+           :cell-factory
+           {:fx/cell-type :table-cell
+            :describe (fn [i] {:text (str (:resource-name i))})}}
+          {:fx/type :table-column
+           :text "Path"
+           :cell-value-factory identity
+           :cell-factory
+           {:fx/cell-type :table-cell
+            :describe (fn [i] {:text (str (:resource-file i))})}}
+          {:fx/type :table-column
+           :text "Import"
+           :cell-value-factory identity
+           :cell-factory
+           {:fx/cell-type :table-cell
+            :describe (fn [_i] {:text "TODO Import buttons"})}}]}]}}}))
 
 
 (defn rapid-download-window
@@ -3782,25 +3861,21 @@
 ; TODO remove and delay most of this stuff
 (defn root-on-created [& args]
   (log/trace "on-created" args)
-  (future
-    (try
-      (reconcile-engines *state)
-      (catch Exception e
-        (log/error e "Error reconciling engines")))
-    (try
-      (reconcile-mods *state)
-      (catch Exception e
-        (log/error e "Error reconciling mods")))
-    (try
-      (reconcile-maps *state)
-      (catch Exception e
-        (log/error e "Error reconciling maps"))))
+  (doseq [import-source import-sources]
+    (add-task! *state (merge
+                        {::task-type ::scan-imports}
+                        import-source)))
+  (add-task! *state {::task-type ::reconcile-engines})
+  (add-task! *state {::task-type ::reconcile-mods})
+  (add-task! *state {::task-type ::reconcile-maps})
+  #_
   (swap! *state assoc :sdp-files-cached
     (delay
       (try
         (doall (rapid/sdp-files))
         (catch Exception e
           (log/error e "Error loading SDP files")))))
+  #_
   (swap! *state assoc :rapid-cache
     (delay
       (try
@@ -3911,7 +3986,8 @@
                  (select-keys state
                    [:archiving :battles :battle :battle-map-details :battle-mod-details :bot-name
                     :bot-username :bot-version :cleaning :copying :drag-team :engine-version
-                    :engines :extracting :git-clone :gitting :http-download :isolation-type
+                    :engines :extracting :git-clone :gitting :http-download :importables-by-path
+                    :isolation-type
                     :map-input-prefix :maps :minimap-type :mods :rapid-data-by-version
                     :rapid-download :username :users]))])
             [{:fx/type :h-box
@@ -3952,7 +4028,7 @@
         [(merge
            {:fx/type import-window}
            (select-keys state
-             [:import-source-name :importables :show-importer]))])
+             [:import-source-name :importables-by-path :show-importer]))])
       (when show-rapid-downloader
         [(merge
            {:fx/type rapid-download-window}
@@ -3969,6 +4045,7 @@
 
 (defn -main [& _args]
   (Platform/setImplicitExit true)
+  (fs/init-7z!)
   (swap! *state assoc :standalone true)
   (add-watchers *state)
   ;(add-hawk *state)
