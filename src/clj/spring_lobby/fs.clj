@@ -630,7 +630,8 @@
      (log/info "Loading map" filename)
      (try
        (merge
-         {:filename filename}
+         {:filename filename
+          :absolute-path (absolute-path file)}
          (cond
            (string/ends-with? filename ".sdz")
            (read-zip-map file opts)
