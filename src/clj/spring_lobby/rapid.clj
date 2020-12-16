@@ -102,9 +102,7 @@
                                :items
                                (filter (comp #{inner-filename} :filename))
                                first)]
-     (assoc inner-details
-            ;:contents (slurp-from-pool root (:md5 inner-details))
-            :content-bytes (slurp-bytes-from-pool root (:md5 inner-details)))
+     (assoc inner-details :content-bytes (slurp-bytes-from-pool root (:md5 inner-details)))
      (log/warn "No such inner rapid file"
                (pr-str {:package (::source decoded-sdp)
                         :inner-filename inner-filename})))))
@@ -120,10 +118,11 @@
   (io/file "/mnt/c/Users/craig/AppData/Local/Programs/Beyond-All-Reason/data/packages/ce1411570bf8ed64222a1ee241a22234.sdp"))
 
 (defn rapid-inner [sdp-file inner-filename]
-  (inner
-    (root-from-sdp sdp-file)
-    (decode-sdp sdp-file)
-    inner-filename))
+  (let [root (root-from-sdp sdp-file)]
+    (inner
+      root
+      (decode-sdp sdp-file)
+      inner-filename)))
 
 (defn sdp-hash [^java.io.File sdp-file]
   (-> (.getName sdp-file)
@@ -190,7 +189,7 @@
   [f filename]
   (try
     (when-let [inner (rapid-inner f filename)]
-      (let [contents (:contents inner)]
+      (let [contents (slurp (:content-bytes inner))]
         (when-not (string/blank? contents)
           (lua/read-modinfo contents))))
     (catch Exception e
