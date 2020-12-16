@@ -266,26 +266,6 @@
 (mod-name-sans-git "Beyond All Reason $VERSION")
 
 
-(defn force-update-battle-mod
-  ([]
-   (force-update-battle-mod *state))
-  ([state-atom]
-   (let [{:keys [battle battles mods]} @state-atom
-         battle-id (:battle-id battle)
-         battle-modname (-> battles (get battle-id) :battle-modname)
-         _ (log/debug "Force updating battle mod details for" battle-modname)
-         battle-modname-sans-git (mod-name-sans-git battle-modname)
-         mod-name-set (set [battle-modname battle-modname-sans-git])
-         filter-fn (comp mod-name-set mod-name-sans-git :mod-name)
-         mod-details (some->> mods
-                              (filter filter-fn)
-                              first
-                              :absolute-path
-                              io/file
-                              read-mod-data)]
-     (swap! *state assoc :battle-mod-details mod-details)
-     mod-details)))
-
 (defn select-debug [state]
   (select-keys state [:pop-out-battle]))
 
@@ -688,6 +668,26 @@
     {:to-add-file-count (count to-add-file)
      :to-add-rapid-count (count to-add-rapid)}))
 
+(defn force-update-battle-mod
+  ([]
+   (force-update-battle-mod *state))
+  ([state-atom]
+   (reconcile-mods state-atom)
+   (let [{:keys [battle battles mods]} @state-atom
+         battle-id (:battle-id battle)
+         battle-modname (-> battles (get battle-id) :battle-modname)
+         _ (log/debug "Force updating battle mod details for" battle-modname)
+         battle-modname-sans-git (mod-name-sans-git battle-modname)
+         mod-name-set (set [battle-modname battle-modname-sans-git])
+         filter-fn (comp mod-name-set mod-name-sans-git :mod-name)
+         mod-details (some->> mods
+                              (filter filter-fn)
+                              first
+                              :absolute-path
+                              io/file
+                              read-mod-data)]
+     (swap! *state assoc :battle-mod-details mod-details)
+     mod-details)))
 
 (def ^java.io.File maps-cache-root
   (io/file (fs/app-root) "maps-cache"))
@@ -2842,6 +2842,7 @@
                ;:delete-action {:event/type ::delete-engine
                ;                :engines engines
                ;                :engine-version engine-version
+               :refresh-action {:event/type ::reload-engines}
                :browse-action {:event/type ::desktop-browse-dir
                                :file (or engine-dir-file
                                          (fs/engines-dir))}
