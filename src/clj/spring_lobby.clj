@@ -2552,10 +2552,9 @@
 (defn could-be-this-engine?
   "Returns true if this downloadable item might be this engine, by magic, false otherwise."
   [engine-version {:keys [resource-filename]}]
-  #p engine-version
   (when (and engine-version resource-filename)
-    (= #p (http/engine-archive engine-version)
-       #p resource-filename)))
+    (= (http/engine-archive engine-version)
+       resource-filename)))
 
 #_
 (->> user/*state
@@ -2803,10 +2802,6 @@
                          download-url (:download-url downloadable)
                          in-progress (-> http-download (get download-url) :running)
                          {:keys [download-source-name download-url]} downloadable]
-                     #p (->> downloadables-by-url
-                             vals
-                             (filter (comp #{::mod} :resource-type))
-                             first)
                      [{:severity (if battle-mod-details 0 2)
                        :text "download"
                        :human-text (if battle-mod-details
@@ -2904,36 +2899,14 @@
                                 (:absolute-path engine-details)
                                 (str "Engine '" engine-version "' not found locally"))}])
                  (when-not engine-details
-                   (if-let [importable (some->> importables-by-path
+                   (when-let [downloadable (->> downloadables-by-url
                                                 vals
                                                 (filter (comp #{::engine} :resource-type))
-                                                (filter (comp #{engine-version} :resource-name))
+                                                (filter (partial could-be-this-engine? engine-version))
                                                 first)]
-                     (let [resource-file (:resource-file importable)
-                           resource-path (fs/absolute-path resource-file)]
-                       [{:severity 2
-                         :text "import"
-                         :human-text (str "Import from" resource-file)
-                         :tooltip (str "Copy engine dir from" (:import-source-name importable)
-                                       " at " resource-file)
-                         :in-progress (-> copying (get resource-path) :status)
-                         :action
-                         {:event/type ::add-task
-                          :task
-                          {:event/type ::import
-                           :importable importable}}}])
-                     (let [downloadable (->> downloadables-by-url
-                                             vals
-                                             (filter (comp #{::engine} :resource-type))
-                                             (filter (partial could-be-this-engine? engine-version))
-                                             first)
-                           url (:download-url downloadable)
+                     (let [url (:download-url downloadable)
                            download (get http-download url)
                            in-progress (:running download)]
-                       #p (->> downloadables-by-url
-                               vals
-                               (filter (comp #{::engine} :resource-type))
-                               first)
                        [{:severity 2
                          :text "download"
                          :human-text (if downloadable
@@ -2946,7 +2919,26 @@
                          :action (when downloadable
                                    {:event/type ::http-downloadable
                                     :downloadable downloadable})}])))
-                 (when (and (not engine-details) 
+                 (when-not engine-details
+                   (when-let [importable (some->> importables-by-path
+                                                  vals
+                                                  (filter (comp #{::engine} :resource-type))
+                                                  (filter (comp #{engine-version} :resource-name))
+                                                  first)]
+                     (let [{:keys [import-source-name resource-file]} importable
+                           resource-path (fs/absolute-path resource-file)]
+                       [{:severity 2
+                         :text "import"
+                         :human-text (str "Import from " import-source-name)
+                         :tooltip (str "Copy engine dir from" import-source-name
+                                       " at " resource-path)
+                         :in-progress (-> copying (get resource-path) :status)
+                         :action
+                         {:event/type ::add-task
+                          :task
+                          {:event/type ::import
+                           :importable importable}}}])))
+                 (when (and (not engine-details)
                             (file-exists? file-cache engine-download-file))
                    [{:severity 2
                      :text "extract"
@@ -3637,8 +3629,10 @@
                                ::mod)))}
    {:download-source-name "SpringLauncher"
     :url http/springlauncher-root
-    :resources-fn http/get-springlauncher-downloadables}])
-  ; TODO springrts buildbot crawling for engines
+    :resources-fn http/get-springlauncher-downloadables}
+   {:download-source-name "SpringRTS buildbot"
+    :url http/springrts-buildbot-root
+    :resources-fn http/crawl-springrts-engine-downloadables}])
   ; TODO bar github releases crawling for engines
 
 
