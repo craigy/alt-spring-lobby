@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" lang="en" xml:lang="en">
+<head>
+    <meta charset="utf-8"/>
+    <title>alt-spring-lobby: Development Diary</title>
+    
+
+<meta name="description" content="IntroductionIn June this year, Good Old Games had a promotion where they gave away the classic RTS game Total Annihilation for free. I never played the original game before, but I had played games on the open source engine inspired by it, Spring, back in the late 2000s (proof). So me and a friend fired it up to try it out on LAN.">
+
+<meta property="og:description" content="IntroductionIn June this year, Good Old Games had a promotion where they gave away the classic RTS game Total Annihilation for free. I never played the original game before, but I had played games on the open source engine inspired by it, Spring, back in the late 2000s (proof). So me and a friend fired it up to try it out on LAN.">
+
+<meta property="og:url" content="https://craigy.github.io/alt-spring-lobby/alt-spring-lobby/pages/development/" />
+<meta property="og:title" content="Development Diary" />
+<meta property="og:type" content="article" />
+
+    <link rel="canonical" href="https://craigy.github.io/alt-spring-lobby/alt-spring-lobby/pages/development/">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link href="//fonts.googleapis.com/css?family=Alegreya:400italic,700italic,400,700" rel="stylesheet"
+          type="text/css">
+    <link rel="stylesheet" href="//maxcdn.bootstrapcdn.com/bootstrap/3.3.0/css/bootstrap.min.css">
+    <link href="//maxcdn.bootstrapcdn.com/font-awesome/4.2.0/css/font-awesome.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="//cdnjs.cloudflare.com/ajax/libs/highlight.js/9.7.0/styles/default.min.css">
+    <link href="/alt-spring-lobby/css/screen.css" rel="stylesheet" type="text/css" />
+</head>
+<body>
+
+
+<nav class="navbar navbar-default">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle collapsed" data-toggle="collapse" data-target="#navbar" aria-expanded="false" aria-controls="navbar">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a class="navbar-brand" href="/alt-spring-lobby/">alt-spring-lobby</a>
+        </div>
+        <div id="navbar" class="navbar-collapse collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li ><a href="/alt-spring-lobby/">Home</a></li>
+                <li
+                ><a href="/alt-spring-lobby/archives/">Archives</a></li>
+                
+                <li><a href="/alt-spring-lobby/feed.xml">RSS</a></li>
+            </ul>
+        </div><!--/.nav-collapse -->
+    </div><!--/.container-fluid -->
+</nav>
+
+
+<div class="container">
+
+
+    <div class="row">
+        <div class="col-lg-9">
+            <div id="content">
+                
+<div id="custom-page">
+    <div id="page-header">
+        <h2>Development Diary</h2>
+    </div>
+    
+    <h2 id="introduction">Introduction</h2><p>In June this year, Good Old Games had a promotion where they gave away the classic RTS game Total Annihilation for free. I never played the original game before, but I had played games on the open source engine inspired by it, <a href="https://springrts.com/">Spring</a>, back in the late 2000s (<a href="https://springrts.com/phpbb/viewtopic.php?f=11&amp;t=13885">proof</a>). So me and a friend fired it up to try it out on LAN.</p><p>Turns out it is pretty hard to get the networking going, which is expected for an old game. So we turned instead to what we knew, and downloaded the main way people have been running Spring games for over a decade, <a href="https://springlobby.springrts.com/">SpringLobby</a>.</p><p>While we were able to play some games, there were crashes, frequent random errors, and performance issues. So I decided it might be a fun side project to work on a replacement.</p><h2 id="goal-and-approach">Goal and Approach</h2><p>Implement a desktop app replacement for SpringLobby that can connect to <a href="https://github.com/spring/uberserver">uberserver</a> (the main Spring lobby server implementation), using the <a href="https://springrts.com/dl/LobbyProtocol/ProtocolDescription.html">Spring lobby protocol</a>, and which can run the Spring application using the interface of passing in the <a href="https://github.com/spring/spring/blob/104.0/doc/StartScriptFormat.txt"><code>script.txt</code> file</a>. The program should also at least point users in the direction of where to get resources such as maps and games to play.</p><p>I'm going to implement this using <a href="https://clojure.org/">Clojure</a>, a JVM Lisp that emphasizes data. There is <a href="https://www.youtube.com/watch?v=2V1FtfBDsLU">a great talk by the language designer</a> on the types of programs the language is targeting, and I think this one fits directly into that category of "situated" programs.</p><p>It will need to have a responsive UI for user input, a TCP connection to the lobby server, as well as some method of tracking resources on disk that will change over time, plus update lists of new resources that can be acquired, not to mention actually starting and monitoring the engine process itself.</p><p>Luckily there are language features, as well as libraries in Clojure or Java that provide the building blocks for all of this.</p><h2 id="first-steps">First Steps</h2><p>I started with a basic UI using a library I've been keeping an eye on, <a href="https://github.com/cljfx/cljfx">cljfx</a>, which turns JavaFX into something resembling a React application, where you describe how state is rendered into the UI. Any changes you make to the state are watched by the renderer, which adjusts the UI accordingly. This is all done based on a <a href="https://clojure.org/reference/atoms">Clojure Atom</a>. You can see it <a href="https://github.com/craigy/alt-spring-lobby/blob/732453b5665d4a04c1c7c9f6c26dd7a2ea61c490/src/clj/spring_lobby.clj#L13">started off small</a>.</p><p><a href="/alt-spring-lobby/img/initial-ui.png">Screenshot of Initial UI</a></p><p>Around the same time, I started talking to a local uberserver instance. I needed to make some changes to get it working on Ubuntu 20.04 and add enable debug logging, so I <a href="https://github.com/craigy/uberserver/tree/fix-mysql">forked the repo and made changes here</a>.</p><p>Once I had the server running, I added the <a href="https://github.com/clj-commons/aleph">Aleph</a> networking library, which provides an easy wrapper over Netty for sending and receiving messages on a TCP connection. I also used <a href="https://github.com/ztellman/gloss">gloss</a> both for splitting the TCP data into messages, as well as <a href="https://github.com/craigy/alt-spring-lobby/commit/b91457792627504cc7e9f31a4d41625b373f2eb4#diff-8d4537ca92172eee422e0f23226d7478af9b95bed4cfc35c566b99a84af89109R33">parsing some of the encoded pieces of the messages</a>.</p><h2 id="running-spring">Running Spring</h2><p>After that, I took a break from things for a month, and when I returned I added the <a href="http://sevenzipjbind.sourceforge.net/">7-Zip-JBinding</a> library for parsing most maps, and extracting engine archives. I also added <a href="https://github.com/craigy/alt-spring-lobby/commit/8c17ad911ba2cd1b3658b416a186570011c8b95f#diff-851cffb722e6a3673b05253c604a4dc51080128152956c9c0fef2d5f09e6d713R301">basic exec of the Spring executable</a>, and some more parts of the protocol, like adding bots.</p><p><a href="battle-and-bots.png">Screenshot of UI With Battle and Bots</a></p><h2 id="parsing-maps">Parsing Maps</h2><p>Parsing map files involves multiple archive formats (Zip and 7-Zip), a <a href="https://springrts.com/wiki/Mapdev:SMF_format">custom binary format</a>, a <a href="https://springrts.com/wiki/Mapdev:SMD">custom config text format</a> for older maps, as well as <a href="https://springrts.com/wiki/Mapdev:mapinfo.lua">executing Lua</a> for the <em>new</em> format.</p><p>I started with the old SMD format, which also seems to be the same format that the <code>script.txt</code> is written in. There's a library for creating grammars for parsing called <a href="https://github.com/engelberg/instaparse">instaparse</a> that often makes describing custom formats like these fairly straightforward. In this case the grammar <a href="https://github.com/craigy/alt-spring-lobby/blob/cc337af57d8b5ad88599d36b3e0c0bf739299557/src/clj/spring_lobby/spring/script.clj#L66-L75">came out to roughly ten lines</a> plus a number of lines to postprocess it into a format that's easier to work with.</p><p>However, there is a possible case with instaparse where <a href="https://github.com/Engelberg/instaparse/issues/196">parsing never terminates</a>. So I wrap its execution with a library called <a href="https://github.com/flatland/clojail">clojail</a>, which basically runs a Thread, and calls <code>.stop</code> if it doesn't complete in time.</p><p>For the new <code>mapinfo.lua</code> format though, it's more difficult, since the map data is now stored as Lua code. I'm sure this is fine in the engine itself when the Lua is being executed, but it's a pain to deal with outside of that context. Thankfully, there's a Java library for executing Lua code, <a href="https://github.com/luaj/luaj">luaj</a>. This, along with some <a href="https://github.com/craigy/alt-spring-lobby/commit/838c01ecbdab69d81dac133ce4f558d0ad0908ba#diff-d599e6e8d4aaec917ba9ab99739b5eb3ef9ea9ca83e9208e16fdfe92e7754002R19-R32">mocking of the Spring internals</a> that sometimes leak into map "data", allows parsing across all maps I've tested.</p><p>Now for the most complex piece of all, the actual map data file <code>.smf</code>. This is a binary file with a header describing the layout. Fortunately, there's a great library <a href="https://github.com/smee/binary"><code>smee/binary</code></a> that fully supports formats like this with headers. There is one more source of complexity here, since the map files can be laid out in any order, so we need to use the offsets and lengths for each section. Once the file is parsed into its component pieces though, we are only partly done: we still need to parse the minimap image.</p><p>The minimap image is stored as the pixels of a DXT1 compressed image, one of the algorithms for <a href="https://docs.microsoft.com/en-us/windows/win32/direct3ddds/dds-header">DDS</a>. As far as I can tell, Java support for this format is... almost nonexistant. Not to mention, the map format doesn't store the whole file, but just the pixes, which happen to be a magical 699048 in length.</p><p>After some <a href="/alt-spring-lobby/img/failed-dworld-minimap.png">failed attempts</a>, I managed to grab the bytes needed to extract the <code>.dds</code> image. The last step is to convert from DDS to a Java Image, either through a library or by manually creating from raw pixels.</p><p>I looked at a number of other implementations of this, like <a href="https://github.com/AledLLEvans/BALobby/blob/7b018ba3e25d95e88b19e5c42446038a6adec5de/spring.lua#L8-L36">BALobby</a> and <a href="https://github.com/enetheru/smf_tools/blob/master/src/smf.h#L43-L66">smf_tools</a>. <code>smf_tools</code> uses the Squish library to uncompress the minimap data into pixels. So I stumbled across <a href="https://github.com/acmi/jsqush">JSquish</a>, a small Java implementation of the Squish compression. While it doesn't seem to be in Nexus or other package management, a jar of it exists <a href="https://github.com/Dahie/DDS-Utils/tree/master/DDSUtils/lib">here</a>. Now I can fully extract the minimap bytes into an Image, for diplay or saving to disk in a more standard format like <code>.png</code>.</p><p>Not sure there's a better way, perhaps maybe just using JNI to call some C++ or Lua implementation. But that might just lead to more reliance on these obscure formats in the first place.</p><h2 id="resources">Resources</h2><p>Now we have some basic processing of local resources, but it would be useful to be able to get new resources like games to play. One method of doing so is also custom to Spring, called <a href="https://springrts.com/wiki/Rapid">Rapid</a>. Rapid seems like a way to deal with small changes between game versions without rolling a new archive, which can be quite overall hundreds of megabytes or larger. In other words, similar to git in many ways. The <code>.sdp</code> format is binary and can be parsed with the same binary library mentioned earlier. To actually download packages, I just shell out to the <a href="https://github.com/spring/pr-downloader"><code>pr-downloader</code> executable</a>.</p><p>Other resources can be downloaded with http, if you know where to look. I use the main <a href="https://github.com/dakrone/clj-http"><code>clj-http</code></a> library which wraps Apache HttpComponents, and this allows easy download to a file, and progress monitoring. At first I tried to build urls based on specific content to look for, but there are issues such as not knowing what case the file will have, or if it is <code>.sdz</code> or <code>.sd7</code>. Now it periodically fetches and parses <a href="https://github.com/craigy/alt-spring-lobby/blob/5ea022f03380ab9f6065e5d38f0442277f918e43/src/clj/spring_lobby/http.clj#L22-L32">a few known websites</a> that are usually html or xml.</p><h2 id="development-workflow">Development Workflow</h2><p>A brief intermission to talk about development workflow. The goal is to have as tight a feedback loop as possible, while recovering from errors in order to not restart the repl for often days at a time. I mainly rolled my own here to learn a bit and get more control. There is tons of potential from just using Clojure's <a href="https://clojure.org/reference/vars">vars</a> and <a href="https://clojure.org/reference/refs">refs</a>. I've previously used others like <a href="https://github.com/stuartsierra/component">component</a> and <a href="https://github.com/danielsz/system">system</a>, and have heard of others like <a href="https://github.com/tolitius/mount">mount</a> but haven't used it.</p><p>The main reloading library is <a href="https://github.com/clojure/tools.namespace">tools.namespace</a> which is used for most reloading as far as I can tell. Basically, when <code>refresh</code> is called, all old namespaces (usually one file maps to one namespace) are unloaded, then the code is recompiled from what's now in the files on disk which should recreate the namespaces, and an optional <code>:after</code> function is called. I use a file watching library called <a href="https://github.com/wkf/hawk">hawk</a> to do the file watching and some teardown (like stoping periodic tasks started with <a href="https://github.com/jarohen/chime/">chime</a> as well as restoring the program state.</p><p>Basically, the program uses one <a href="https://clojure.org/reference/atoms"><code>atom</code></a> for its state, and various threads makes changes to it. Another feature that I didn't know about until recently is <a href="https://clojure.github.io/clojure/clojure.core-api.html#clojure.core/add-watch"><code>add-watch</code></a> which calls a function whenever the state of a ref like an atom changes. I (ab)use this for things like updating config files when the user makes changes in the UI, or loading the minimap from disk when the current map changes.</p><p>There are a few situations where reloading would not update the running program, that needed special treatment. The UI view, the UI event handler, and the TCP client handler. For these, in dev mode, I use <code>(var-get (find-var ...)</code> to dynamically get the new version when namespaces are refreshed. That way, the program will keep its entire state, keep rendering the UI, talking to the server, etc., even after recompile, which is usually less than a second. This works fairly well, although compile errors sometimes cause namespaces to not be reloaded, and various things will break until full compilation happens again.</p><h2 id="file-scanning">File Scanning</h2><p>My first attempt to updating resources over time was to use file watchers with something like <a href="https://github.com/wkf/hawk">hawk</a> which I use in the development loop.</p><p><img src="/alt-spring-lobby/img/battle-minimap-and-resources.png" alt="Present Day Screenshot" /></p><h2 id="advancements">Advancements</h2><p>Now that we have feature parity with SpringLobby in a number of areas, I've started finally adding the improvements I set out to do in the first place. One annoyance, the "Random" starting positions didn't seem to be actually random, but rather just a hash or something. So I added <a href="https://github.com/craigy/alt-spring-lobby/commit/4eadacd84011c26918b905931344717790d86cdd">shuffling of team ids in this case</a>, so my friends and I can start in different unknown locations.</p><p>Another issue, depending on where the uberserver is located, the wrong IP address for the host may be used. So I <a href="https://github.com/craigy/alt-spring-lobby/commit/ffe8eec18c3fadc2ffc9612a2aca0808da7c379b">added an override</a>, since it is just a part of <code>script.txt</code> ultimately, although the lobby protocol uses it in battle open.</p><p>One thing I want to do soon, is add a key customization UI, and some alternative configurations, so that my Starcraft friends can play the game.</p><h2 id="future">Future</h2><p>Since it's part of the lobby protocol, I do want to implement chatting sometime, despite the prevalence of discord.</p><p>I need to add multiple servers and logins support, soon.</p><p>Need to parse the <code>.smf</code> file more properly. Don't try to use <code>ordered-map</code> to parse the body, just use offsets and <code>ByteBuffer.wrap</code>. Then we can get the heightmap too.</p><p>I try to capture these in CHANGELOG.md</p><h2 id="this-website">This Website</h2><p>To make these web pages, I used, you guessed it, another Clojure library called <a href="http://cryogenweb.org/index.html">Cryogen</a>. After a few false starts I figured out the URI paths and how to export to the <a href="https://github.com/craigy/alt-spring-lobby/tree/gh-pages"><code>gh-pages</code> branch</a> so it will be hosted here.</p>
+
+    <div id="prev-next">
+        
+        
+        
+    </div>
+</div>
+
+            </div>
+        </div>
+
+        <div class="col-md-3">
+            <div id="sidebar">
+                <h3>Links</h3>
+                <ul id="links">
+                    
+                    <li><a href="/alt-spring-lobby/pages/development/">Development Diary</a></li>
+                    
+                </ul>
+                
+                
+            </div>
+        </div>
+    </div>
+    <footer>Copyright &copy; 2020 craigy
+        <p style="text-align: center;">Powered by <a href="http://cryogenweb.org">Cryogen</a></p></footer>
+</div>
+<script src="//code.jquery.com/jquery-1.11.0.min.js"></script>
+<script src="//maxcdn.bootstrapcdn.com/bootstrap/3.3.0/js/bootstrap.min.js"></script>
+<script src="/alt-spring-lobby/js/highlight.pack.js" type="application/javascript"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+
+
+</body>
+</html>
