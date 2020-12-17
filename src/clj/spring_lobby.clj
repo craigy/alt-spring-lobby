@@ -193,8 +193,7 @@
     (when-let [map-file (some->> *state deref :maps
                                  (filter (comp #{map-name} :map-name))
                                  first
-                                 :filename
-                                 fs/map-file)]
+                                 :file)]
       (fs/read-map-data map-file))
     (catch Exception e
       (log/warn e "Error loading map cache for" (str "'" map-name "'")))))
@@ -223,21 +222,21 @@
   (let [mod-data (read-mod-data file {:modinfo-only false})
         mod-name (:mod-name mod-data)
         cache-file (mod-cache-file mod-name)
-        mod-details (select-keys mod-data [:filename :absolute-path :mod-name ::fs/source
-                                           :git-commit-id])]
+        mod-details (select-keys mod-data [:file :mod-name ::fs/source :git-commit-id])]
     (log/info "Caching" mod-name "to" cache-file)
     (spit cache-file (with-out-str (pprint mod-data)))
     (let [state @state-atom
           battle-id (-> state :battle :battle-id)
           battle-modname (-> state :battles (get battle-id) :battle-modname)
           battle-mod-details (:battle-mod-details state)]
-      (when (or (= (:absolute-path mod-data) (:absolute-path battle-mod-details))
+      (when (or (= (fs/canonical-path (:file mod-data))
+                   (fs/canonical-path (:file battle-mod-details)))
                 (= (:mod-name mod-details) battle-modname)) ; can this ever happen?
         (log/info "Updating battle mod details")
         (swap! state-atom assoc :battle-mod-details mod-data))) ; TODO avoid dupe swap
     (swap! state-atom update :mods
            (fn [mods]
-             (-> (remove (comp #{(:absolute-path mod-details)} :absolute-path) mods)
+             (-> (remove (comp #{(fs/canonical-path (:file mod-details))} fs/canonical-path :file) mods)
                  (conj mod-details)
                  set)))
     mod-data))
@@ -349,8 +348,7 @@
                                        :mods
                                        (filter filter-fn)
                                        first
-                                       :absolute-path
-                                       io/file
+                                       :file
                                        read-mod-data)]
               (swap! *state assoc :battle-mod-details mod-details))))
         (catch Exception e
@@ -465,13 +463,13 @@
                              (io/file f)
                              f)]
                      (if f
-                       {:absolute-path (fs/absolute-path f)
+                       {:canonical-path (fs/canonical-path f)
                         :exists (fs/exists f)
                         :is-directory (.isDirectory f)}
                        (log/warn "Attempt to update file cache for nil file"))))
         status-by-path (->> statuses
                             (filter some?)
-                            (map (juxt :absolute-path identity))
+                            (map (juxt :canonical-path identity))
                             (into {}))]
     (swap! *state update :file-cache merge status-by-path)
     status-by-path))
@@ -480,7 +478,7 @@
   (when f
     (let [path (if (string? f)
                  f
-                 (fs/absolute-path f))]
+                 (fs/canonical-path f))]
       (get file-cache path))))
 
 (defn file-exists? [file-cache f]
@@ -587,19 +585,22 @@
    (apply update-file-cache! (file-seq (fs/download-dir))) ; TODO move this somewhere
    (let [before (u/curr-millis)
          engine-dirs (fs/engine-dirs)
-         known-absolute-paths (->> state-atom deref :engines (map :absolute-path) (filter some?) set)
-         to-add (remove (comp known-absolute-paths fs/absolute-path) engine-dirs)
-         absolute-path-set (set (map fs/absolute-path engine-dirs))
+         known-canonical-paths (->> state-atom deref :engines
+                                    (map (comp fs/canonical-path :file))
+                                    (filter some?)
+                                    set)
+         to-add (remove (comp known-canonical-paths fs/canonical-path) engine-dirs)
+         canonical-path-set (set (map fs/canonical-path engine-dirs))
          missing-files (set
                          (concat
-                           (->> known-absolute-paths
+                           (->> known-canonical-paths
                                 (remove (comp fs/exists io/file)))
-                           (->> known-absolute-paths
+                           (->> known-canonical-paths
                                 (remove (comp (partial fs/descendant? (fs/isolation-dir)) io/file)))))
          to-remove (set
                      (concat missing-files
-                             (remove absolute-path-set known-absolute-paths)))]
-     (apply update-file-cache! known-absolute-paths)
+                             (remove canonical-path-set known-canonical-paths)))]
+     (apply update-file-cache! known-canonical-paths)
      (log/info "Found" (count to-add) "engines to load in" (- (u/curr-millis) before) "ms")
      (doseq [engine-dir to-add]
        (log/info "Detecting engine data for" engine-dir)
@@ -611,8 +612,8 @@
      (swap! state-atom update :engines
             (fn [engines]
               (->> engines
-                   (filter :absolute-path)
-                   (remove (comp to-remove :absolute-path))
+                   (filter :file)
+                   (remove (comp to-remove fs/canonical-path :file))
                    set)))
      {:to-add-count (count to-add)
       :to-remove-count (count to-remove)})))
@@ -622,18 +623,19 @@
          (fn [mods]
            (->> mods
                 (remove (comp string/blank? :mod-name))
-                (filter (comp fs/exists io/file :absolute-path))
+                (filter (comp fs/exists :file))
                 set))))
 
 (defn remove-all-duplicate-mods
-  "Removes all copies of any mod that shares :absolute-path with another mod."
+  "Removes all copies of any mod that shares canonical-path with another mod."
   [state-atom]
   (log/info "Removing duplicate mods")
   (swap! state-atom update :mods
          (fn [mods]
-           (let [freqs (frequencies (map :absolute-path mods))]
+           (let [path-fn (comp fs/canonical-path :file)
+                 freqs (frequencies (map path-fn mods))]
              (->> mods
-                  (remove (comp pos? dec freqs :absolute-path))
+                  (remove (comp pos? dec freqs path-fn))
                   set)))))
 
 (defn reconcile-mods
@@ -643,14 +645,14 @@
   (let [before (u/curr-millis)
         mods (->> state-atom deref :mods)
         {:keys [rapid archive directory]} (group-by ::fs/source mods)
-        known-file-paths (set (map :absolute-path (concat archive directory)))
-        known-rapid-paths (set (map :absolute-path rapid))
+        known-file-paths (set (map (comp fs/canonical-path :file) (concat archive directory)))
+        known-rapid-paths (set (map (comp fs/canonical-path :file) rapid))
         mod-files (fs/mod-files)
         sdp-files (rapid/sdp-files)
         _ (log/info "Found" (count mod-files) "files and"
                     (count sdp-files) "rapid archives to scan for mods")
-        to-add-file (remove (comp known-file-paths fs/absolute-path) mod-files)
-        to-add-rapid (remove (comp known-rapid-paths fs/absolute-path) sdp-files)
+        to-add-file (remove (comp known-file-paths fs/canonical-path) mod-files)
+        to-add-rapid (remove (comp known-rapid-paths fs/canonical-path) sdp-files)
         all-paths (filter some? (concat known-file-paths known-rapid-paths))
         missing-files (set
                         (concat
@@ -671,7 +673,7 @@
            (fn [mods]
              (->> mods
                   (remove (comp string/blank? :mod-name))
-                  (remove (comp missing-files :absolute-path))
+                  (remove (comp missing-files fs/canonical-path :file))
                   set)))
     {:to-add-file-count (count to-add-file)
      :to-add-rapid-count (count to-add-rapid)}))
@@ -691,8 +693,7 @@
          mod-details (some->> mods
                               (filter filter-fn)
                               first
-                              :absolute-path
-                              io/file
+                              :file
                               read-mod-data)]
      (swap! *state assoc :battle-mod-details mod-details)
      mod-details)))
@@ -708,11 +709,13 @@
   [state-atom]
   (let [before (u/curr-millis)
         map-files (fs/map-files)
-        known-filenames (->> state-atom deref :maps (map :filename) set)
-        todo (remove (comp known-filenames fs/filename) map-files)
-        missing-filenames (->> known-filenames
-                               (remove (comp fs/exists fs/map-file))
-                               set)]
+        known-files (->> state-atom deref :maps (map :file) set)
+        known-paths (->> known-files (map fs/canonical-path) set)
+        todo (remove (comp known-paths fs/canonical-path) map-files)
+        missing-paths (->> known-files
+                           (remove fs/exists)
+                           (map fs/canonical-path)
+                           set)]
     (apply update-file-cache! map-files)
     (log/info "Found" (count todo) "maps to load in" (- (u/curr-millis) before) "ms")
     (when-not (fs/exists maps-cache-root)
@@ -727,14 +730,15 @@
             (spit map-cache-file (with-out-str (pprint map-data)))
             (swap! state-atom update :maps
                    (fn [maps]
-                     (set (conj maps (select-keys map-data [:filename :map-name]))))))
+                     (set (conj maps (select-keys map-data [:file :map-name]))))))
           (log/warn "No map name found for" map-file))))
-    (log/debug "Removing maps with no name, and" (count missing-filenames) "maps with missing files")
+    (log/debug "Removing maps with no name, and" (count missing-paths) "maps with missing files")
     (swap! state-atom update :maps
            (fn [maps]
              (->> maps
+                  (filter :file)
                   (remove (comp string/blank? :map-name))
-                  (remove (comp missing-filenames :filename))
+                  (remove (comp missing-paths fs/canonical-path :file))
                   set)))
     {:todo-count (count todo)}))
 
@@ -751,8 +755,7 @@
          map-details (some->> maps
                               (filter filter-fn)
                               first
-                              :absolute-path
-                              io/file
+                              :file
                               fs/read-map-data)]
      (swap! *state assoc :battle-map-details map-details)
      map-details)))
@@ -1880,7 +1883,7 @@
 
 (defn update-copying [f copying]
   (if f
-    (swap! *state update-in [:copying (fs/absolute-path f)] merge copying)
+    (swap! *state update-in [:copying (fs/canonical-path f)] merge copying)
     (log/warn "Attempt to update copying for nil file")))
 
 (defmethod event-handler ::add-task [{:keys [task]}]
@@ -1907,9 +1910,7 @@
     (update-copying source {:status true})
     (update-copying dest {:status true})
     (try
-      (if (.isDirectory source) ; TODO replace with one fn to do both in fs
-        (spring/copy-dir source dest)
-        (spring/java-nio-copy source dest))
+      (fs/copy source dest)
       (log/info "Finished importing" importable "from" source "to" dest)
       (case (:resource-type importable)
         ::map (force-update-battle-map *state)
@@ -1924,115 +1925,27 @@
         (update-file-cache! source)
         (update-file-cache! dest))))) ; TODO atomic?
 
-(defmethod event-handler ::copy-file
-  [{:keys [source dest] :as e}]
-  (if source
-    (do
-      (log/info "Copying from" source "to" dest)
-      (swap! *state assoc-in [:copying (fs/absolute-path source)] {:status true})
+(defmethod event-handler ::git-mod
+  [{:keys [battle-mod-git-ref file]}]
+  (when (and file battle-mod-git-ref)
+    (log/info "Resetting mod at" file "to ref" battle-mod-git-ref)
+    (let [canonical-path (fs/canonical-path)]
+      (swap! *state assoc-in [:gitting canonical-path] {:status true})
       (future
         (try
-          (spring/java-nio-copy source dest) ; TODO move to fs
+          (git/fetch file)
+          (git/reset-hard file battle-mod-git-ref)
+          (reconcile-mods *state)
+          (force-update-battle-mod *state)
           (catch Exception e
-            (log/error e "Error copying from" source "to" dest))
+            (log/error e "Error during git reset" canonical-path "to ref" battle-mod-git-ref))
           (finally
-            (swap! *state assoc-in [:copying (fs/absolute-path source)] {:status false})))))
-    (log/warn "No source to copy for event" e)))
-
-(defmethod event-handler ::copy-map ; TODO duplicate of ::copy-file ?
-  [{:keys [map-filename engine-version]}]
-  (log/info "Copying map" map-filename "to" engine-version)
-  (swap! *state assoc-in [:copying map-filename] {:status true})
-  (future
-    (try
-      (spring/copy-map map-filename engine-version)
-      (catch Exception e
-        (log/error e "Error copying map" map-filename "to isolation dir for" engine-version))
-      (finally
-        (swap! *state assoc-in [:copying map-filename] {:status false})))))
-
-
-(defmethod event-handler ::copy-mod ; TODO duplicate of ::copy-file ?
-  [{:keys [mod-details engine-version]}]
-  (let [mod-filename (:filename mod-details)]
-    (log/info "Copying mod" mod-filename "to" engine-version)
-    (swap! *state assoc-in [:copying mod-filename] {:status true})
-    (future
-      (try
-        (spring/copy-mod mod-details engine-version)
-        (catch Exception e
-          (log/error e "Error copying mod" mod-filename "to isolation dir for" engine-version))
-        (finally
-          (swap! *state assoc-in [:copying mod-filename] {:status false}))))))
-
-(defmethod event-handler ::git-mod
-  [{:keys [battle-mod-git-ref absolute-path]}]
-  (when (and absolute-path battle-mod-git-ref)
-    (log/info "Checking out mod" absolute-path "to" battle-mod-git-ref)
-    (swap! *state assoc-in [:gitting absolute-path] {:status true})
-    (future
-      (try
-        (git/fetch (io/file absolute-path))
-        (git/reset-hard (io/file absolute-path) battle-mod-git-ref)
-        (reconcile-mods *state)
-        (force-update-battle-mod *state)
-        (catch Exception e
-          (log/error e "Error during git reset" absolute-path "to" battle-mod-git-ref))
-        (finally
-          (swap! *state assoc-in [:gitting absolute-path] {:status false}))))))
-
-(defmethod event-handler ::archive-mod
-  [{:keys [mod-details engine-version]}]
-  (let [mod-filename (:filename mod-details)]
-    (log/info "Archiving mod" mod-filename "to" engine-version)
-    (swap! *state assoc-in [:archiving mod-filename] {:status true})
-    (future
-      (try
-        (spring/archive-mod mod-details engine-version)
-        (catch Exception e
-          (log/error e "Error archiving mod" mod-filename "to isolation dir for" engine-version)
-          (raynes-fs/delete
-            (spring/mod-isolation-archive-file mod-details engine-version)))
-        (finally
-          (swap! *state assoc-in [:archiving mod-filename] {:status false}))))))
-
-(defmethod event-handler ::copy-engine
-  [{:keys [engines engine-version]}]
-  (log/info "Copying engine" engine-version "to isolation dir")
-  (swap! *state assoc-in [:copying engine-version] {:status true})
-  (future
-    (try
-      (spring/copy-engine engines engine-version)
-      (catch Exception e
-        (log/error e "Error copying engine" engine-version "to isolation dir"))
-      (finally
-        (swap! *state assoc-in [:copying engine-version] {:status false})))))
-
-(defmethod event-handler ::clean-engine
-  [{:keys [engines engine-version]}]
-  (let [engine-details (spring/engine-details engines engine-version)
-        absolute-path (:absolute-path engine-details)
-        engine-dir (io/file absolute-path)]
-    (log/info "Cleaning engine" engine-version "at" engine-dir)
-    (swap! *state assoc-in [:cleaning engine-version] {:status true})
-    (future
-      (try
-        (raynes-fs/delete-dir (io/file engine-dir "packages"))
-        (raynes-fs/delete-dir (io/file engine-dir "pool"))
-        (catch Exception e
-          (log/error e "Error cleaning engine" engine-version "at" engine-dir))
-        (finally
-          (swap! *state assoc-in [:cleaning engine-version] {:status false}))))))
+            (swap! *state assoc-in [:gitting canonical-path] {:status false})))))))
 
 
 (defn engine-dest [engine-version]
   (when engine-version
     (io/file (fs/spring-root) "engine" (http/engine-archive engine-version))))
-
-#_
-(defn engine-download-file [engine-version]
-  (when engine-version
-    (io/file (fs/download-dir) "engine" (http/engine-archive engine-version))))
 
 
 (def minimap-types
@@ -2486,8 +2399,7 @@
   (if-let [engine-dir (some->> engines
                                (filter (comp #{engine-version} :engine-version))
                                first
-                               :absolute-path
-                               io/file)]
+                               :file)]
     (do
       (log/info "Deleting engine dir" engine-dir)
       (raynes-fs/delete-dir engine-dir)
@@ -2593,7 +2505,6 @@
 (defn battle-view
   [{:keys [battle battles battle-map-details battle-mod-details bot-name bot-username bot-version
            copying downloadables-by-url drag-team engines extracting file-cache git-clone gitting http-download importables-by-path
-           isolation-type
            map-input-prefix maps minimap-type rapid-data-by-version rapid-download users username]
     :as state}]
   (let [{:keys [host-username battle-map battle-modname]} (get battles (:battle-id battle))
@@ -2610,10 +2521,9 @@
         starting-points (minimap-starting-points battle-details battle-map-details scripttags minimap-width minimap-height)
         engine-version (:battle-version battle-details)
         engine-details (spring/engine-details engines engine-version)
-        engine-absolute-path (:absolute-path engine-details)
-        engine-dir-file (when engine-absolute-path (io/file engine-absolute-path))
+        engine-file (:file engine-details)
         engine-download-file (http/engine-download-file engine-version) ; TODO duplicate of downloadable?
-        bots (fs/bots engine-absolute-path)
+        bots (fs/bots engine-file)
         minimap-image (case minimap-type
                         "metalmap" (:metalmap-image smf)
                         ; else
@@ -2674,6 +2584,7 @@
                :disable (string/blank? bot-name)
                :on-value-changed {:event/type ::change-bot-version}
                :items (or bot-versions [])}]}
+            #_
             {:fx/type :h-box
              :alignment :center-left
              :children
@@ -2704,15 +2615,13 @@
                 :icon-literal "mdi-nuke:32:white"}}]}
             {:fx/type :h-box
              :children
-             [(let [map-filename (:filename battle-map-details)
-                    map-isolation-file (spring/map-isolation-file      ; needs to be read from maps
-                                         map-filename engine-version)] ; TODO allow different names
+             [(let [map-file (:file battle-map-details)]
                 {:fx/type resource-sync-pane
                  :h-box/margin 8
                  :resource "Map" ;battle-map ; (str "map (" battle-map ")")
                  ;:delete-action {:event/type ::delete-map}
                  :browse-action {:event/type ::desktop-browse-dir
-                                 :file (or map-isolation-file (fs/maps-dir))}
+                                 :file (or map-file (fs/maps-dir))}
                  :refresh-action {:event/type ::force-update-battle-map}
                  :issues
                  (concat
@@ -2721,7 +2630,7 @@
                        :text "info"
                        :human-text battle-map
                        :tooltip (if (zero? severity)
-                                  (:absolute-path battle-map-details)
+                                  (fs/canonical-path (:file battle-map-details))
                                   (str "Map '" battle-map "' not found locally"))}])
                    (when-not battle-map-details
                      (let [downloadable (->> downloadables-by-url
@@ -2747,7 +2656,7 @@
                          :tooltip (if in-progress
                                     (str "Downloading " (:current download) " / " (:total download))
                                     (if dest-exists
-                                      (str "Downloaded to " (fs/absolute-path dest))
+                                      (str "Downloaded to " (fs/canonical-path dest))
                                       (str "Download " url)))
                          :in-progress in-progress
                          :action (when (and downloadable (not dest-exists))
@@ -2760,16 +2669,16 @@
                                                (filter (partial could-be-this-map? battle-map))
                                                first)
                            resource-file (:resource-file importable)
-                           absolute-path (fs/absolute-path resource-file)]
+                           canonical-path (fs/canonical-path resource-file)]
                        [{:severity 2
                          :text "import"
                          :human-text (if importable
                                        (str "Import from " (:import-source-name importable))
                                        "No import found")
                          :tooltip (if importable
-                                    (str "Copy map archive from " absolute-path)
+                                    (str "Copy map archive from " canonical-path)
                                     (str "No local import found for map " battle-map))
-                         :in-progress (-> copying (get absolute-path) :status)
+                         :in-progress (-> copying (get canonical-path) :status)
                          :action
                          (when (and importable
                                     (not (file-exists? file-cache (resource-dest importable))))
@@ -2777,8 +2686,8 @@
                             :task
                             {::task-type ::import
                              :importable importable}})}])))})
-              (let [absolute-path (:absolute-path battle-mod-details)
-                    mod-file (when absolute-path (io/file absolute-path))]
+              (let [mod-file (:file battle-mod-details)
+                    canonical-path (fs/canonical-path mod-file)]
                 {:fx/type resource-sync-pane
                  :h-box/margin 8
                  :resource "Game" ;battle-modname ; (str "game (" battle-modname ")")
@@ -2793,7 +2702,7 @@
                        :text "info"
                        :human-text battle-modname
                        :tooltip (if (zero? severity)
-                                  (:absolute-path battle-mod-details)
+                                  canonical-path
                                   (str "Game '" battle-modname "' not found locally"))}])
                    (when-not battle-mod-details
                      (let [downloadable (->> downloadables-by-url
@@ -2825,22 +2734,22 @@
                        [{:severity 2
                          :text "rapid"
                          :human-text (if rapid-id
-                                       (if engine-absolute-path
+                                       (if engine-file
                                          (str "Download rapid " rapid-id)
                                          "Needs engine first to download with rapid")
                                        "No rapid download")
                          :tooltip (if rapid-id
-                                    (if engine-absolute-path
+                                    (if engine-file
                                       (str "Use rapid downloader to get resource id " rapid-id
                                            " using engine " (:engine-version engine-details))
                                       "Rapid requires an engine to work, get engine first")
                                     (str "No rapid download found for" battle-modname))
                          :in-progress in-progress
                          :action
-                         (when (and rapid-id engine-absolute-path)
+                         (when (and rapid-id engine-file)
                            {:event/type ::rapid-download
                             :rapid-id rapid-id
-                            :engine-absolute-path engine-absolute-path})}]))
+                            :engine-file engine-file})}]))
                    (when-not battle-mod-details
                      (let [importable (some->> importables-by-path
                                                vals
@@ -2863,16 +2772,6 @@
                                     :task
                                     {::task-type ::import
                                      :importable importable}})}]))
-                   (when (and (not battle-mod-details) mod-file)
-                     (let [in-progress (-> copying (get (:filename battle-mod-details)) :status)]
-                       [{:severity (if (fs/filename (file-exists? file-cache mod-file)
-                                            (not in-progress))
-                                     0 1)
-                         :text "copy"
-                         :in-progress in-progress
-                         :action {:event/type ::copy-mod
-                                  :mod-details battle-mod-details
-                                  :engine-version engine-version}}]))
                    (when (and (= :directory
                                  (::fs/source battle-mod-details)))
                      (let [battle-mod-git-ref (mod-git-ref battle-modname)
@@ -2882,7 +2781,7 @@
                        [(merge
                           {:severity severity
                            :text "git"
-                           :in-progress (-> gitting (get absolute-path) :status)}
+                           :in-progress (-> gitting (get canonical-path) :status)}
                           (if (= battle-mod-git-ref "$VERSION")
                             ; unspecified git commit ^
                             {:human-text (str "Unspecified git ref " battle-mod-git-ref)
@@ -2893,7 +2792,7 @@
                                            (str "Reset git to ref " battle-mod-git-ref))
                              :action
                              {:event/type ::git-mod
-                              :absolute-path absolute-path
+                              :file mod-file
                               :battle-mod-git-ref battle-mod-git-ref}}))])))})
               {:fx/type resource-sync-pane
                :h-box/margin 8
@@ -2903,7 +2802,7 @@
                ;                :engine-version engine-version
                :refresh-action {:event/type ::reload-engines}
                :browse-action {:event/type ::desktop-browse-dir
-                               :file (or engine-dir-file
+                               :file (or engine-file
                                          (fs/engines-dir))}
                :issues
                (concat
@@ -2912,7 +2811,7 @@
                      :text "info"
                      :human-text (str "Spring " engine-version)
                      :tooltip (if (zero? severity)
-                                (:absolute-path engine-details)
+                                (fs/canonical-path (:file engine-details))
                                 (str "Engine '" engine-version "' not found locally"))}])
                  (when-not engine-details
                    (let [downloadable (->> downloadables-by-url
@@ -2938,7 +2837,7 @@
                        :tooltip (if in-progress
                                   (str "Downloading " (:current download) " / " (:total download))
                                   (if dest-exists
-                                    (str "Downloaded to " (fs/absolute-path dest))
+                                    (str "Downloaded to " (fs/canonical-path dest))
                                     (str "Download " url)))
                        :in-progress in-progress
                        :action (when (and downloadable (not dest-exists))
@@ -2961,7 +2860,7 @@
                                              (filter (partial could-be-this-engine? engine-version))
                                              first)
                          {:keys [import-source-name resource-file]} importable
-                         resource-path (fs/absolute-path resource-file)]
+                         resource-path (fs/canonical-path resource-file)]
                      [{:severity 2
                        :text "import"
                        :human-text (if importable
@@ -3383,20 +3282,20 @@
   [_e]
   (let [{:keys [engine-version engines]} @*state
         preferred-engine-details (spring/engine-details engines engine-version)
-        engine-details (if (and preferred-engine-details (:absolute-path preferred-engine-details))
+        engine-details (if (and preferred-engine-details (:file preferred-engine-details))
                          preferred-engine-details
                          (->> engines
-                              (filter :absolute-path)
+                              (filter :file)
                               first))
         root (fs/isolation-dir)]
-    (if (and engine-details (:absolute-path engine-details))
+    (if (and engine-details (:file engine-details))
       (do
         (log/info "Initializing rapid by downloading something")
         (deref
           (event-handler
             {:event/type ::rapid-download
              :rapid-id "feature-placer:stable" ; TODO how else to init rapid without download...
-             :engine-absolute-path (:absolute-path engine-details)})))
+             :engine-file (:file engine-details)})))
       (log/warn "No engine details to do rapid init"))
     (log/info "Updating rapid versions in" root)
     (let [before (u/curr-millis)
@@ -3422,14 +3321,14 @@
   (swap! *state assoc :rapid-repo event))
 
 (defmethod event-handler ::rapid-download
-  [{:keys [engine-absolute-path rapid-id]}]
+  [{:keys [engine-file rapid-id]}]
   (swap! *state assoc-in [:rapid-download rapid-id] {:running true
                                                      :message "Preparing to run pr-downloader"})
   (future
     (try
-      (let [pr-downloader-file (io/file engine-absolute-path (fs/executable "pr-downloader"))
+      (let [pr-downloader-file (io/file engine-file (fs/executable "pr-downloader"))
             root (fs/isolation-dir) ; TODO always?
-            command [(fs/absolute-path pr-downloader-file)
+            command [(fs/canonical-path pr-downloader-file)
                      "--filesystem-writepath" (fs/wslpath root)
                      "--rapid-download" rapid-id]
             runtime (Runtime/getRuntime)]
@@ -3607,9 +3506,8 @@
                           ::mod (:mod-name (read-mod-data resource-file))
                           ::engine (:engine-version (fs/engine-data resource-file))
                           ::sdp (:mod-name (read-mod-data resource-file)))
-          absolute-path (fs/absolute-path resource-file)
           now (u/curr-millis)]
-      (swap! *state update-in [:importables-by-path absolute-path]
+      (swap! *state update-in [:importables-by-path (fs/canonical-path resource-file)]
              assoc :resource-name resource-name
              :resource-updated now)
       resource-name)))
@@ -3635,11 +3533,12 @@
                       (map (partial importable-data ::mod import-source-name) (concat mod-files sdp-files))
                       (map (partial importable-data ::engine import-source-name) engine-dirs))
         importables-by-path (->> importables
-                                 (map (juxt (comp fs/absolute-path :resource-file) identity))
+                                 (map (juxt (comp fs/canonical-path :resource-file) identity))
                                  (into {}))]
     (log/info "Found imports" (frequencies (map :resource-type importables)))
     (swap! *state update :importables-by-path merge importables-by-path)
     importables-by-path
+    #_
     (doseq [importable (filter (comp #{::engine} :resource-type) importables)]
       (add-task! *state {::task-type ::update-importable
                          :importable importable}))))
@@ -3704,7 +3603,7 @@
   [{:keys [file import-source-name]}]
   {:text (str import-source-name
               (when file
-                (str " ( at " (fs/absolute-path file) " )")))})
+                (str " ( at " (fs/canonical-path file) " )")))})
 
 (defn import-type-cell
   [import-type]
@@ -3869,7 +3768,7 @@
                                  true)))
                      (filter (fn [{:keys [resource-file resource-name]}]
                                (if-not (string/blank? import-filter)
-                                 (let [path (fs/absolute-path resource-file)]
+                                 (let [path (fs/canonical-path resource-file)]
                                    (or (and path
                                             (string/includes?
                                               (string/lower-case path)
@@ -3915,8 +3814,8 @@
            {:fx/cell-type :table-cell
             :describe
             (fn [importable]
-              (let [source-path (some-> importable :resource-file fs/absolute-path)
-                    dest-path (some-> importable resource-dest fs/absolute-path)
+              (let [source-path (some-> importable :resource-file fs/canonical-path)
+                    dest-path (some-> importable resource-dest fs/canonical-path)
                     disable (boolean
                               (or (-> copying (get source-path) :status) ; TODO standard fn
                                   (file-exists? file-cache source-path)
@@ -4139,7 +4038,7 @@
            {:fx/cell-type :table-cell
             :describe
             (fn [{:keys [download-url] :as downloadable}]
-              (let [dest-path (some-> downloadable resource-dest fs/absolute-path)
+              (let [dest-path (some-> downloadable resource-dest fs/canonical-path)
                     disable (boolean
                               (or (-> downloading (get download-url) :status) ; TODO standard fn
                                   (file-exists? file-cache dest-path)))]
@@ -4302,8 +4201,8 @@
                      {:fx/type :button
                       :on-action {:event/type ::rapid-download
                                   :rapid-id (:id i)
-                                  :engine-absolute-path
-                                  (:absolute-path
+                                  :engine-file
+                                  (:file
                                     (spring/engine-details engines engine-version))}
                       :graphic
                       {:fx/type font-icon/lifecycle
@@ -4485,7 +4384,7 @@
     (add-task! state-atom {::task-type ::reconcile-engines})
     (add-task! state-atom {::task-type ::reconcile-mods})
     (add-task! state-atom {::task-type ::reconcile-maps})
-    (add-task! state-atom {::task-type ::update-rapid})
+    ;(add-task! state-atom {::task-type ::update-rapid})
     (event-handler {:event/type ::update-downloadables})
     (event-handler {:event/type ::scan-imports})
     {:tasks-chimer tasks-chimer}))

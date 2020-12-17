@@ -98,8 +98,13 @@
 
 (defn view [state]
   (require 'spring-lobby)
-  (let [actual-view (var-get (find-var 'spring-lobby/root-view))]
-    (actual-view state)))
+  (try
+    (let [actual-view (var-get (find-var 'spring-lobby/root-view))]
+      (actual-view state))
+    (catch Exception e
+      (if (string/starts-with? (.getMessage e) "No such namespace:")
+        (println "compile error")
+        (println e)))))
 
 (defn event-handler [e]
   (require 'spring-lobby)
@@ -119,7 +124,7 @@
         (try
           (println "Initializing 7zip")
           (init-7z-fn)
-          (println "Finally finished initializing 7zip")
+          (println "Finished initializing 7zip")
           (catch Exception e
             (println e)))))
     (alter-var-root #'*state (constantly (var-get (find-var 'spring-lobby/*state))))
