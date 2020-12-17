@@ -41,6 +41,7 @@
 (defn stop-chimer [chimer]
   (when chimer
     (try
+      (println "Stopping chimer" chimer)
       (chimer)
       (catch Exception e
         (println "error stopping chimer" chimer e)))))
@@ -48,9 +49,9 @@
 (defn rerender []
   (try
     (println "Stopping old chimers")
-    (let [{:keys [tasks-chimer file-events-chimer]} @init-state]
-      (stop-chimer tasks-chimer)
-      (stop-chimer file-events-chimer))
+    (let [{:keys [chimers]} @init-state]
+      (doseq [chimer chimers]
+        (stop-chimer chimer)))
     (println "Requiring spring-lobby ns")
     (require 'spring-lobby)
     (alter-var-root (find-var 'spring-lobby/*state) (constantly *state))
@@ -60,14 +61,14 @@
         (try
           (renderer)
           (catch Exception e
-            (println "error rendering" e))))
+            (println "error rendering" e)
+            (throw e))))
       (println "No renderer"))
-    (future
-      (try
-        (let [init-fn (var-get (find-var 'spring-lobby/init))]
-          (init-fn *state))
-        (catch Exception e
-          (println "init error" e))))
+    (try
+      (let [init-fn (var-get (find-var 'spring-lobby/init))]
+        (reset! init-state (init-fn *state)))
+      (catch Exception e
+        (println "init error" e)))
     (catch Exception e
       (println e))))
 
@@ -102,9 +103,8 @@
     (let [actual-view (var-get (find-var 'spring-lobby/root-view))]
       (actual-view state))
     (catch Exception e
-      (if (string/starts-with? (.getMessage e) "No such namespace:")
-        (println "compile error")
-        (println e)))))
+      (println "compile error" e)
+      (throw e))))
 
 (defn event-handler [e]
   (require 'spring-lobby)
@@ -140,7 +140,8 @@
       (alter-var-root #'renderer (constantly r)))
     (fx/mount-renderer *state renderer)
     (catch Exception e
-      (println e))))
+      (println e)
+      (throw e))))
 
 
 (defn add-dependencies [coordinates]

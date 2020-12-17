@@ -582,6 +582,7 @@
   ([]
    (reconcile-engines *state))
   ([state-atom]
+   (log/info "Reconciling engines")
    (apply update-file-cache! (file-seq (fs/download-dir))) ; TODO move this somewhere
    (let [before (u/curr-millis)
          engine-dirs (fs/engine-dirs)
@@ -618,6 +619,31 @@
      {:to-add-count (count to-add)
       :to-remove-count (count to-remove)})))
 
+(defn force-update-battle-engine
+  ([]
+   (force-update-battle-engine *state))
+  ([state-atom]
+   (log/info "Force updating battle engine")
+   (reconcile-engines state-atom)
+   (let [{:keys [battle battles engines]} @state-atom
+         battle-id (:battle-id battle)
+         battle-engine-version (-> battles (get battle-id) :battle-version)
+         _ (log/debug "Force updating battle engine details for" battle-engine-version)
+         filter-fn (comp #{battle-engine-version} :engine-version)
+         engine-details (some->> engines
+                                 (filter filter-fn)
+                                 first
+                                 :file
+                                 fs/engine-data)]
+     (swap! *state update :engines
+            (fn [engines]
+              (->> engines
+                   (remove filter-fn)
+                   (concat [engine-details])
+                   set)))
+     engine-details)))
+
+
 (defn remove-bad-mods [state-atom]
   (swap! state-atom update :mods
          (fn [mods]
@@ -641,6 +667,7 @@
 (defn reconcile-mods
   "Reads mod details and updates missing mods in :mods in state."
   [state-atom]
+  (log/info "Reconciling mods")
   (remove-all-duplicate-mods state-atom)
   (let [before (u/curr-millis)
         mods (->> state-atom deref :mods)
@@ -651,7 +678,9 @@
         sdp-files (rapid/sdp-files)
         _ (log/info "Found" (count mod-files) "files and"
                     (count sdp-files) "rapid archives to scan for mods")
-        to-add-file (remove (comp known-file-paths fs/canonical-path) mod-files)
+        to-add-file (concat
+                      (remove (comp known-file-paths fs/canonical-path) mod-files)
+                      (map :file directory)) ; always scan dirs in case git changed
         to-add-rapid (remove (comp known-rapid-paths fs/canonical-path) sdp-files)
         all-paths (filter some? (concat known-file-paths known-rapid-paths))
         missing-files (set
@@ -682,6 +711,7 @@
   ([]
    (force-update-battle-mod *state))
   ([state-atom]
+   (log/info "Force updating battle mod")
    (reconcile-mods state-atom)
    (let [{:keys [battle battles mods]} @state-atom
          battle-id (:battle-id battle)
@@ -707,6 +737,7 @@
 (defn reconcile-maps
   "Reads map details and caches for maps missing from :maps in state."
   [state-atom]
+  (log/info "Reconciling maps")
   (let [before (u/curr-millis)
         map-files (fs/map-files)
         known-files (->> state-atom deref :maps (map :file) set)
@@ -746,6 +777,7 @@
   ([]
    (force-update-battle-map *state))
   ([state-atom]
+   (log/info "Force updating battle map")
    (reconcile-maps state-atom)
    (let [{:keys [battle battles maps]} @state-atom
          battle-id (:battle-id battle)
@@ -759,6 +791,25 @@
                               fs/read-map-data)]
      (swap! *state assoc :battle-map-details map-details)
      map-details)))
+
+
+(defn force-update-chimer-fn [state-atom]
+  (log/info "Starting force update chimer")
+  (let [chimer
+        (chime/chime-at
+          (chime/periodic-seq
+            (java-time/instant)
+            (java-time/duration 1 :minutes))
+          (fn [_chimestamp]
+            (force-update-battle-engine state-atom)
+            (force-update-battle-mod state-atom)
+            (force-update-battle-map state-atom))
+          {:error-handler
+           (fn [e]
+             (log/error e "Error force updating resources")
+             true)})]
+    (fn [] (.close chimer))))
+
 
 (defmethod task-handler ::reconcile-engines [_]
   (reconcile-engines *state))
@@ -775,7 +826,7 @@
   (reconcile-maps *state)) ; TODO specific map
 
 
-(defmethod event-handler ::reload-engines [_e]
+(defmethod event-handler ::reconcile-engines [_e]
   (future
     (try
       (reconcile-engines *state)
@@ -1320,6 +1371,7 @@
            (let [filter-lc (if engine-filter (string/lower-case engine-filter) "")
                  filtered-engines (->> engines
                                        (map :engine-version)
+                                       (filter some?)
                                        (filter #(string/includes? (string/lower-case %) filter-lc))
                                        sort)]
              [{:fx/type :combo-box
@@ -1360,7 +1412,7 @@
              :text "Reload engines"}}
            :desc
            {:fx/type :button
-            :on-action {:event/type ::reload-engines}
+            :on-action {:event/type ::reconcile-engines}
             :graphic
             {:fx/type font-icon/lifecycle
              :icon-literal "mdi-refresh:16:white"}}}])}
@@ -2380,16 +2432,29 @@
 (defmethod event-handler ::isolation-type-change [{:fx/keys [event]}]
   (log/info event))
 
-(defmethod event-handler ::force-update-battle-map [{:fx/keys [event]}]
-  (log/info event)
-  (force-update-battle-map *state))
+(defmethod event-handler ::force-update-battle-map [_e]
+  (future
+    (try
+      (force-update-battle-map *state)
+      (catch Exception e
+        (log/error e "Error force updating battle map")))))
 
 (defmethod event-handler ::delete-map [{:fx/keys [event]}]
   (log/info event))
 
-(defmethod event-handler ::force-update-battle-mod [{:fx/keys [event]}]
-  (log/info event)
-  (force-update-battle-mod *state))
+(defmethod event-handler ::force-update-battle-mod [_e]
+  (future
+    (try
+      (force-update-battle-mod *state)
+      (catch Exception e
+        (log/error e "Error force updating battle mod")))))
+
+(defmethod event-handler ::force-update-battle-engine [_e]
+  (future
+    (try
+      (force-update-battle-engine *state)
+      (catch Exception e
+        (log/error e "Error force updating battle engine")))))
 
 (defmethod event-handler ::delete-mod [{:fx/keys [event]}]
   (log/info event))
@@ -2778,29 +2843,38 @@
                            severity (if (= battle-modname
                                            (:mod-name battle-mod-details))
                                       0 1)]
-                       [(merge
-                          {:severity severity
-                           :text "git"
-                           :in-progress (-> gitting (get canonical-path) :status)}
-                          (if (= battle-mod-git-ref "$VERSION")
-                            ; unspecified git commit ^
-                            {:human-text (str "Unspecified git ref " battle-mod-git-ref)
-                             :tooltip (str "SpringLobby does not specify version, "
-                                           "yours may not be compatible")}
-                            {:human-text (if (zero? severity)
-                                           (str "git at ref " battle-mod-git-ref)
-                                           (str "Reset git to ref " battle-mod-git-ref))
-                             :action
-                             {:event/type ::git-mod
-                              :file mod-file
-                              :battle-mod-git-ref battle-mod-git-ref}}))])))})
+                       (concat
+                         [(merge
+                            {:severity severity
+                             :text "git"
+                             :in-progress (-> gitting (get canonical-path) :status)}
+                            (if (= battle-mod-git-ref "$VERSION")
+                              ; unspecified git commit ^
+                              {:human-text (str "Unspecified git ref " battle-mod-git-ref)
+                               :tooltip (str "SpringLobby does not specify version, "
+                                             "yours may not be compatible")}
+                              {:human-text (if (zero? severity)
+                                             (str "git at ref " battle-mod-git-ref)
+                                             (str "Reset " (fs/filename (:file battle-mod-details))
+                                                  " git to ref " battle-mod-git-ref))
+                               :action
+                               {:event/type ::git-mod
+                                :file mod-file
+                                :battle-mod-git-ref battle-mod-git-ref}}))]
+                         (when-not (zero? severity)
+                           [(merge
+                              {:severity 1
+                               :text "rehost"
+                               :human-text "Or rehost to change game version"
+                               :tooltip (str "Leave battle and host again to use game "
+                                             (:mod-name battle-mod-details))})])))))})
               {:fx/type resource-sync-pane
                :h-box/margin 8
                :resource "Engine" ; engine-version ; (str "engine (" engine-version ")")
                ;:delete-action {:event/type ::delete-engine
                ;                :engines engines
                ;                :engine-version engine-version
-               :refresh-action {:event/type ::reload-engines}
+               :refresh-action {:event/type ::force-update-battle-engine}
                :browse-action {:event/type ::desktop-browse-dir
                                :file (or engine-file
                                          (fs/engines-dir))}
@@ -3091,28 +3165,29 @@
                                   drag-team)
                            x (or (:x drag) x)
                            y (or (:y drag) y)
-                           xc (- x (if (= 1 (count team))
+                           xc (- x (if (= 1 (count team)) ; single digit
                                      (* start-pos-r -0.6)
                                      (* start-pos-r -0.2)))
-                           yc (+ y (/ start-pos-r 0.75))]
+                           yc (+ y (/ start-pos-r 0.75))
+                           text (if (= "Random" startpostype) "?" team)]
                        (cond
-                         (#{"Fixed" "Choose before game"} startpostype)
+                         (#{"Fixed" "Random" "Choose before game"} startpostype)
                          (do
                            (.beginPath gc)
                            (.rect gc x y
                                   (* 2 start-pos-r)
                                   (* 2 start-pos-r))
-                           (.setFill gc color)
+                           (.setFill gc (if (= "Random" startpostype) Color/RED color))
                            (.fill gc)
                            (.setStroke gc border-color)
                            (.stroke gc)
                            (.closePath gc)
                            (.setStroke gc Color/BLACK)
-                           (.strokeText gc team xc yc)
+                           (.strokeText gc text xc yc)
                            (.setFill gc Color/WHITE)
-                           (.fillText gc team xc yc))
-                         :else
-                         (.fillOval gc x y start-pos-r start-pos-r))))))})])}
+                           (.fillText gc text xc yc))
+                         :else ; TODO choose starting rects
+                         nil)))))})])}
         {:fx/type :h-box
          :alignment :center-left
          :children
@@ -3289,13 +3364,16 @@
                               first))
         root (fs/isolation-dir)]
     (if (and engine-details (:file engine-details))
-      (do
-        (log/info "Initializing rapid by downloading something")
-        (deref
-          (event-handler
-            {:event/type ::rapid-download
-             :rapid-id "feature-placer:stable" ; TODO how else to init rapid without download...
-             :engine-file (:file engine-details)})))
+      (if-not (and (fs/exists (io/file root "rapid"))
+                   (fs/exists (io/file root "rapid" "packages.springrts.com" "versions.gz")))
+        (do
+          (log/info "Initializing rapid by calling download")
+          (deref
+            (event-handler
+              {:event/type ::rapid-download
+               :rapid-id "engine:stable" ; TODO how else to init rapid without download...
+               :engine-file (:file engine-details)})))
+        (log/info "Rapid already initialized"))
       (log/warn "No engine details to do rapid init"))
     (log/info "Updating rapid versions in" root)
     (let [before (u/curr-millis)
@@ -3356,7 +3434,7 @@
                   (log/info "pr-downloader" rapid-id "stderr stream closed")))))
           (.waitFor process)
           (swap! *state assoc-in [:rapid-download rapid-id :running] false)
-          (swap! *state assoc :sdp-files-cached (doall (rapid/sdp-files root)))))
+          (swap! *state assoc :sdp-files (doall (rapid/sdp-files root)))))
       (catch Exception e
         (log/error e "Error downloading" rapid-id)
         (swap! *state assoc-in [:rapid-download rapid-id :message] (.getMessage e)))
@@ -4061,8 +4139,8 @@
 
 (defn rapid-download-window
   [{:keys [engine-version engines rapid-download rapid-filter rapid-repo rapid-repos rapid-versions
-           rapid-data-by-hash sdp-files-cached show-rapid-downloader]}]
-  (let [sdp-files (or sdp-files-cached [])
+           rapid-data-by-hash sdp-files show-rapid-downloader]}]
+  (let [sdp-files (or sdp-files [])
         sdp-hashes (set (map rapid/sdp-hash sdp-files))]
     {:fx/type :stage
      :showing show-rapid-downloader
@@ -4207,8 +4285,25 @@
                       :graphic
                       {:fx/type font-icon/lifecycle
                        :icon-literal "mdi-download:16:white"}}}))))}}]}
-        {:fx/type :label
-         :text " Packages"}
+        {:fx/type :h-box
+         :alignment :center-left
+         :children
+         [{:fx/type :label
+           :style {:-fx-font-size 16}
+           :text " Packages"}
+          {:fx/type fx.ext.node/with-tooltip-props
+           :props
+           {:tooltip
+            {:fx/type :tooltip
+             :show-delay [10 :ms]
+             :text "Open rapid packages directory"}}
+           :desc
+           {:fx/type :button
+            :on-action {:event/type ::desktop-browse-dir
+                        :file (io/file (fs/isolation-dir) "packages")}
+            :graphic
+            {:fx/type font-icon/lifecycle
+             :icon-literal "mdi-folder:16:white"}}}]}
         {:fx/type :table-view
          :column-resize-policy :constrained ; TODO auto resize
          :items sdp-files
@@ -4353,7 +4448,7 @@
       {:fx/type rapid-download-window}
       (select-keys state
         [:engine-version :engines :rapid-download :rapid-filter :rapid-repo :rapid-repos :rapid-versions
-         :rapid-data-by-hash :sdp-files-cached :show-rapid-downloader]))
+         :rapid-data-by-hash :sdp-files :show-rapid-downloader]))
     {:fx/type :stage
      :showing pop-out-battle
      :title "alt-spring-lobby Battle"
@@ -4378,17 +4473,17 @@
 (defn init
   "Things to do on program init, or in dev after a recompile."
   [state-atom]
-  (let [tasks-chimer (tasks-chimer-fn state-atom)]
-    ;    file-events-chimer (file-events-chimer-fn state-atom)]
+  (let [tasks-chimer (tasks-chimer-fn state-atom)
+        force-update-chimer (force-update-chimer-fn state-atom)]
     (add-watchers state-atom)
     (add-task! state-atom {::task-type ::reconcile-engines})
     (add-task! state-atom {::task-type ::reconcile-mods})
     (add-task! state-atom {::task-type ::reconcile-maps})
-    ;(add-task! state-atom {::task-type ::update-rapid})
+    (add-task! state-atom {::task-type ::update-rapid})
     (event-handler {:event/type ::update-downloadables})
     (event-handler {:event/type ::scan-imports})
-    {:tasks-chimer tasks-chimer}))
-     ;:file-events-chimer file-events-chimer}))
+    {:chimers [tasks-chimer force-update-chimer]}))
+
 
 (defn -main [& _args]
   (Platform/setImplicitExit true)

@@ -35,7 +35,7 @@
   ([]
    (sides nil))
   ([mod-name]
-   (if (and mod-name (string/starts-with? "Beyond All Reason" mod-name)) ; TODO where to get this
+   (if (and mod-name (string/starts-with? mod-name "Beyond All Reason")) ; TODO where to get this
      bar-sides
      ba-sides)))
 
