@@ -1929,7 +1929,7 @@
   [{:keys [battle-mod-git-ref file]}]
   (when (and file battle-mod-git-ref)
     (log/info "Resetting mod at" file "to ref" battle-mod-git-ref)
-    (let [canonical-path (fs/canonical-path)]
+    (let [canonical-path (fs/canonical-path file)]
       (swap! *state assoc-in [:gitting canonical-path] {:status true})
       (future
         (try

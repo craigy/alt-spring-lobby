@@ -71,7 +71,7 @@
 
 (defn to-path [^File f]
   (when f
-    (.to-path f)))
+    (.toPath f)))
 
 
 (defn os-name []
