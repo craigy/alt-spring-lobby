@@ -54,12 +54,6 @@
     (println "Requiring spring-lobby ns")
     (require 'spring-lobby)
     (alter-var-root (find-var 'spring-lobby/*state) (constantly *state))
-    (future
-      (try
-        (let [init-fn (var-get (find-var 'spring-lobby/init))]
-          (init-fn *state))
-        (catch Exception e
-          (println "init error" e))))
     (if renderer
       (do
         (println "Re-rendering")
@@ -68,6 +62,12 @@
           (catch Exception e
             (println "error rendering" e))))
       (println "No renderer"))
+    (future
+      (try
+        (let [init-fn (var-get (find-var 'spring-lobby/init))]
+          (init-fn *state))
+        (catch Exception e
+          (println "init error" e))))
     (catch Exception e
       (println e))))
 

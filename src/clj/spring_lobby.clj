@@ -15,7 +15,6 @@
     [clojure.set]
     [clojure.string :as string]
     [com.evocomputing.colors :as colors]
-    [crouton.html :as html]
     hashp.core
     [hawk.core :as hawk]
     java-time
@@ -57,7 +56,7 @@
 (def download-window-width 1600)
 (def download-window-height 800)
 
-(def battle-window-width 1920)
+(def battle-window-width 1740)
 (def battle-window-height 800)
 
 (def start-pos-r 10.0)
@@ -116,7 +115,6 @@
     (slurp-app-edn "mods.edn")
     (slurp-app-edn "importables.edn")
     (slurp-app-edn "downloadables.edn")
-    (slurp-app-edn "rapid.edn")
     {:file-events (initial-file-events)
      :tasks (initial-tasks)}))
 
@@ -155,8 +153,8 @@
 (def config-keys
   [:username :password :server-url :engine-version :mod-name :map-name
    :battle-title :battle-password
-   :bot-username :bot-name :bot-version
-   :scripttags :preferred-color :minimap-type])
+   :bot-username :bot-name :bot-version :minimap-type :pop-out-battle
+   :scripttags :preferred-color :rapid-repo])
 
 
 (defn select-config [state]
@@ -186,7 +184,7 @@
 
 (defn select-rapid [state]
   (select-keys state
-    [:rapid-repo :rapid-repos :rapid-data-by-hash :rapid-data-by-version]))
+    [:rapid-repo :rapid-repos :rapid-data-by-hash :rapid-data-by-version :rapid-versions]))
 
 
 (defn safe-read-map-cache [map-name]
@@ -287,7 +285,7 @@
   (remove-watch state-atom :mods)
   (remove-watch state-atom :importables)
   (remove-watch state-atom :downloadables)
-  (remove-watch state-atom :rapid)
+  ;(remove-watch state-atom :rapid)
   (remove-watch state-atom :battle-map-details)
   (remove-watch state-atom :battle-mod-details)
   (remove-watch state-atom :fix-missing-resource)
@@ -310,7 +308,7 @@
   (add-watch-state-to-edn state-atom :mods select-mods "mods.edn")
   (add-watch-state-to-edn state-atom :importables select-importables "importables.edn")
   (add-watch-state-to-edn state-atom :downloadables select-downloadables "downloadables.edn")
-  (add-watch-state-to-edn state-atom :rapid select-rapid "rapid.edn")
+  ;(add-watch-state-to-edn state-atom :rapid select-rapid "rapid.edn")
   (add-watch state-atom :battle-map-details
     (fn [_k _ref old-state new-state]
       (try
@@ -3384,9 +3382,14 @@
 (defmethod task-handler ::update-rapid
   [_e]
   (let [{:keys [engine-version engines]} @*state
-        engine-details (spring/engine-details engines engine-version)
+        preferred-engine-details (spring/engine-details engines engine-version)
+        engine-details (if (and preferred-engine-details (:absolute-path preferred-engine-details))
+                         preferred-engine-details
+                         (->> engines
+                              (filter :absolute-path)
+                              first))
         root (fs/isolation-dir)]
-    (if engine-details
+    (if (and engine-details (:absolute-path engine-details))
       (do
         (log/info "Initializing rapid by downloading something")
         (deref
@@ -3410,21 +3413,13 @@
       (swap! *state assoc
              :rapid-repos rapid-repos
              :rapid-data-by-hash rapid-data-by-hash
-             :rapid-data-by-version rapid-data-by-version)
+             :rapid-data-by-version rapid-data-by-version
+             :rapid-versions rapid-versions)
       (log/info "Updated rapid repo data in" (- (u/curr-millis) before) "ms"))))
 
 (defmethod event-handler ::rapid-repo-change
   [{:fx/keys [event]}]
-  (future
-    (try
-      (swap! *state assoc :rapid-repo event)
-      (let [versions (->> (rapid/versions event)
-                          (sort-by :version version/version-compare)
-                          reverse
-                          doall)]
-        (swap! *state assoc :rapid-versions-cached versions))
-      (catch Exception e
-        (log/error e)))))
+  (swap! *state assoc :rapid-repo event))
 
 (defmethod event-handler ::rapid-download
   [{:keys [engine-absolute-path rapid-id]}]
@@ -3469,53 +3464,6 @@
       (finally
         (swap! *state assoc-in [:rapid-download rapid-id :running] false)
         (reconcile-mods *state)))))
-
-(defmethod event-handler ::engine-branch-change
-  [{:keys [engine-branch] :fx/keys [event]}]
-  (let [engine-branch (or engine-branch event)]
-    (swap! *state assoc :engine-branch engine-branch)
-    (future
-      (try
-        (log/debug "Getting engine versions for branch" engine-branch)
-        (let [versions (->> (http/springrts-buildbot-files [engine-branch])
-                            (sort-by :filename version/version-compare)
-                            reverse
-                            doall)]
-          (log/debug "Got engine versions" (pr-str versions))
-          (swap! *state assoc :engine-versions-cached versions))
-        (catch Exception e
-          (log/error e))))))
-
-(defmethod event-handler ::maps-index-change
-  [{:keys [maps-index-url] :fx/keys [event]}]
-  (let [maps-index-url (or maps-index-url event)]
-    (swap! *state assoc :maps-index-url maps-index-url)
-    (future
-      (try
-        (log/debug "Getting maps from" maps-index-url)
-        (let [map-files (->> (http/files (html/parse maps-index-url))
-                             (sort-by :filename)
-                             doall)]
-          (log/debug "Got maps" (pr-str map-files))
-          (swap! *state assoc :map-files-cache map-files))
-        (catch Exception e
-          (log/error e))))))
-
-(defmethod event-handler ::mods-index-change
-  [{:keys [mods-index-url] :fx/keys [event]}]
-  (let [mods-index-url (or mods-index-url event)]
-    (swap! *state assoc :mods-index-url mods-index-url)
-    (future
-      (try
-        (log/debug "Getting mods from" mods-index-url)
-        (let [mod-files (->> (http/files (html/parse mods-index-url))
-                             (sort-by :filename)
-                             doall)]
-          (log/debug "Got mods" (pr-str mod-files))
-          (swap! *state assoc :mod-files-cache mod-files))
-        (catch Exception e
-          (log/error e))))))
-
 
 
 ; https://github.com/dakrone/clj-http/pull/220/files
@@ -3618,10 +3566,17 @@
 (defmethod event-handler ::http-downloadable
   [{:keys [downloadable]}]
   (log/info "Request to download" downloadable)
-  (event-handler
-    {:event/type ::http-download
-     :dest (resource-dest downloadable)
-     :url (:download-url downloadable)}))
+  (future
+    (deref
+      (event-handler
+        {:event/type ::http-download
+         :dest (resource-dest downloadable)
+         :url (:download-url downloadable)}))
+    (case (:resource-type downloadable)
+      ::map (force-update-battle-map *state)
+      ::mod (force-update-battle-mod *state)
+      ::engine (reconcile-engines *state)
+      nil)))
 
 
 (defmethod event-handler ::extract-7z
@@ -4206,7 +4161,7 @@
 
 
 (defn rapid-download-window
-  [{:keys [engine-version engines rapid-download rapid-repo rapid-repos rapid-versions-cached
+  [{:keys [engine-version engines rapid-download rapid-filter rapid-repo rapid-repos rapid-versions
            rapid-data-by-hash sdp-files-cached show-rapid-downloader]}]
   (let [sdp-files (or sdp-files-cached [])
         sdp-hashes (set (map rapid/sdp-hash sdp-files))]
@@ -4225,15 +4180,10 @@
       {:fx/type :v-box
        :children
        [{:fx/type :h-box
+         :style {:-fx-font-size 16}
          :alignment :center-left
          :children
          [{:fx/type :label
-           :text " Repo: "}
-          {:fx/type :choice-box
-           :value (str rapid-repo)
-           :items (or rapid-repos [])
-           :on-value-changed {:event/type ::rapid-repo-change}}
-          {:fx/type :label
            :text " Engine for pr-downloader: "}
           {:fx/type :choice-box
            :value (str engine-version)
@@ -4242,9 +4192,68 @@
                            sort)
                       [])
            :on-value-changed {:event/type ::version-change}}]}
+        {:fx/type :h-box
+         :style {:-fx-font-size 16}
+         :alignment :center-left
+         :children
+         (concat
+           [{:fx/type :label
+             :text " Filter Repo: "}
+            {:fx/type :choice-box
+             :value (str rapid-repo)
+             :items (or rapid-repos [])
+             :on-value-changed {:event/type ::rapid-repo-change}}]
+           (when rapid-repo
+             [{:fx/type fx.ext.node/with-tooltip-props
+               :props
+               {:tooltip
+                {:fx/type :tooltip
+                 :show-delay [10 :ms]
+                 :text "Clear rapid repo filter"}}
+               :desc
+               {:fx/type :button
+                :on-action {:event/type ::dissoc
+                            :key :rapid-repo}
+                :graphic
+                {:fx/type font-icon/lifecycle
+                 :icon-literal "mdi-close:16:white"}}}])
+           [{:fx/type :label
+             :text " Rapid Filter: "}
+            {:fx/type :text-field
+             :text rapid-filter
+             :prompt-text "Filter by name or path"
+             :on-text-changed {:event/type ::assoc
+                               :key :rapid-filter}}]
+           (when-not (string/blank? rapid-filter)
+             [{:fx/type fx.ext.node/with-tooltip-props
+               :props
+               {:tooltip
+                {:fx/type :tooltip
+                 :show-delay [10 :ms]
+                 :text "Clear filter"}}
+               :desc
+               {:fx/type :button
+                :on-action {:event/type ::dissoc
+                            :key :rapid-filter}
+                :graphic
+                {:fx/type font-icon/lifecycle
+                 :icon-literal "mdi-close:16:white"}}}]))}
         {:fx/type :table-view
          :column-resize-policy :constrained ; TODO auto resize
-         :items (or rapid-versions-cached [])
+         :items (or (->> rapid-versions
+                         (filter
+                           (fn [{:keys [id]}]
+                             (if rapid-repo
+                               (string/starts-with? id (str rapid-repo ":"))
+                               true)))
+                         (filter
+                           (fn [{:keys [version]}]
+                             (if-not (string/blank? rapid-filter)
+                               (string/includes?
+                                 (string/lower-case version)
+                                 (string/lower-case rapid-filter))
+                               true))))
+                    [])
          :columns
          [{:fx/type :table-column
            :text "ID"
@@ -4337,296 +4346,6 @@
                           (get rapid-data-by-hash)
                           :version
                           str)})}}]}]}}}))
-
-
-(defn http-download-window
-  [{:keys [engine-branch engine-versions-cached engines extracting file-cache http-download map-files-cache
-           maps-index-url mod-files-cache mods-index-url show-http-downloader]}]
-  (let [engine-branches http/engine-branches]
-    {:fx/type :stage
-     :showing show-http-downloader
-     :title "alt-spring-lobby HTTP Downloader"
-     :on-close-request (fn [^javafx.stage.WindowEvent e]
-                         (swap! *state assoc :show-http-downloader false)
-                         (.consume e))
-     :width download-window-width
-     :height download-window-height
-     :scene
-     {:fx/type :scene
-      :stylesheets stylesheets
-      :root
-      {:fx/type :v-box
-       :children
-       [{:fx/type :h-box
-         :alignment :center-left
-         :children
-         [{:fx/type :label
-           :text " Engine branch: "}
-          {:fx/type :choice-box
-           :value (str engine-branch)
-           :items (or engine-branches [])
-           :on-value-changed {:event/type ::engine-branch-change}}
-          {:fx/type :button
-           :on-action {:event/type ::engine-branch-change
-                       :engine-branch engine-branch}
-           :graphic
-           {:fx/type font-icon/lifecycle
-            :icon-literal "mdi-refresh:16:white"}}]}
-        {:fx/type :table-view
-         :column-resize-policy :constrained ; TODO auto resize
-         :items (or (filter :url engine-versions-cached)
-                    [])
-         :columns
-         [{:fx/type :table-column
-           :text "Link"
-           :cell-value-factory identity
-           :cell-factory
-           {:fx/cell-type :table-cell
-            :describe
-            (fn [i]
-              {:text (str (:filename i))})}}
-          {:fx/type :table-column
-           :text "Archive URL"
-           :cell-value-factory identity
-           :cell-factory
-           {:fx/cell-type :table-cell
-            :describe
-            (fn [i]
-              (if-let [url (:url i)]
-                (let [[_all version] (re-find #"(.*)/" url)
-                      engine-path (http/engine-path engine-branch version)]
-                  {:text (str engine-path)})
-                {:text "-"}))}}
-          {:fx/type :table-column
-           :text "Date"
-           :cell-value-factory identity
-           :cell-factory
-           {:fx/cell-type :table-cell
-            :describe
-            (fn [i]
-              {:text (str (:date i))})}}
-          {:fx/type :table-column
-           :text "Size"
-           :cell-value-factory identity
-           :cell-factory
-           {:fx/cell-type :table-cell
-            :describe
-            (fn [i]
-              {:text (str (:size i))})}}
-          {:fx/type :table-column
-           :text "Download"
-           :cell-value-factory identity
-           :cell-factory
-           {:fx/cell-type :table-cell
-            :describe
-            (fn [i]
-              (if-let [url (:url i)]
-                (let [[_all version] (re-find #"(.*)/" url)
-                      url nil
-                      ;url (http/engine-url version)
-                      download (get http-download url)
-                      dest (engine-dest version)
-                      engine-version (str version
-                                       (when (not= http/default-engine-branch engine-branch)
-                                         (str " " engine-branch)))]
-                  (merge
-                    {:text (str (:message download))
-                     :style {:-fx-font-family "monospace"}}
-                    (cond
-                      (file-exists? file-cache dest)
-                      {:graphic
-                       (if (some #{engine-version} (map :engine-version engines))
-                         {:fx/type font-icon/lifecycle
-                          :icon-literal "mdi-check:16:white"}
-                         {:fx/type :button
-                          :disable (boolean (or (:running download)
-                                                (get extracting dest)))
-                          :on-action {:event/type ::extract-7z
-                                      :file dest}
-                          :tooltip {:fx/type :tooltip
-                                    :show-delay [10 :ms]
-                                    :text (if (get extracting dest)
-                                            "Extracting..."
-                                            (str "Extract " version))}
-                          :graphic
-                          {:fx/type font-icon/lifecycle
-                           :icon-literal "mdi-package-variant:16:white"}})}
-                      (:running download) nil
-                      :else
-                      {:graphic
-                       {:fx/type :button
-                        :on-action {:event/type ::http-download
-                                    :url url
-                                    :dest dest}
-                        :graphic
-                        {:fx/type font-icon/lifecycle
-                         :icon-literal "mdi-download:16:white"}}})))
-                {:text "-"}))}}]}
-        {:fx/type :h-box
-         :alignment :center-left
-         :children
-         [{:fx/type :label
-           :text " Games index URL: "}
-          {:fx/type :choice-box
-           :value (str mods-index-url)
-           :items [http/springfightclub-root]
-           :on-value-changed {:event/type ::mods-index-change}}
-          {:fx/type :button
-           :on-action {:event/type ::mods-index-change
-                       :mods-index-url mods-index-url}
-           :graphic
-           {:fx/type font-icon/lifecycle
-            :icon-literal "mdi-refresh:16:white"}}]}
-        {:fx/type :table-view
-         :column-resize-policy :constrained ; TODO auto resize
-         :items (or mod-files-cache
-                    [])
-         :columns
-         [{:fx/type :table-column
-           :text "Filename"
-           :cell-value-factory identity
-           :cell-factory
-           {:fx/cell-type :table-cell
-            :describe
-            (fn [i]
-              {:text (str (:filename i))})}}
-          {:fx/type :table-column
-           :text "URL"
-           :cell-value-factory identity
-           :cell-factory
-           {:fx/cell-type :table-cell
-            :describe
-            (fn [i]
-              {:text (str (:url i))})}}
-          {:fx/type :table-column
-           :text "Date"
-           :cell-value-factory identity
-           :cell-factory
-           {:fx/cell-type :table-cell
-            :describe
-            (fn [i]
-              {:text (str (:date i))})}}
-          {:fx/type :table-column
-           :text "Size"
-           :cell-value-factory identity
-           :cell-factory
-           {:fx/cell-type :table-cell
-            :describe
-            (fn [i]
-              {:text (str (:size i))})}}
-          {:fx/type :table-column
-           :text "Download"
-           :cell-value-factory identity
-           :cell-factory
-           {:fx/cell-type :table-cell
-            :describe
-            (fn [i]
-              (let [url (str mods-index-url "/" (:url i))
-                    download (get http-download url)
-                    dest (io/file (fs/spring-root) "games" (:filename i))]
-                (merge
-                  {:text (str (:message download))
-                   :style {:-fx-font-family "monospace"}}
-                  (cond
-                    (or (not (:size i)) (= "-" (string/trim (:size i)))) nil
-                    (file-exists? file-cache dest)
-                    {:graphic
-                     {:fx/type font-icon/lifecycle
-                      :icon-literal "mdi-check:16:white"}}
-                    (:running download)
-                    nil
-                    :else
-                    {:graphic
-                     {:fx/type :button
-                      :on-action {:event/type ::http-download
-                                  :url url
-                                  :dest dest}
-                      :graphic
-                      {:fx/type font-icon/lifecycle
-                       :icon-literal "mdi-download:16:white"}}}))))}}]}
-        {:fx/type :h-box
-         :alignment :center-left
-         :children
-         [{:fx/type :label
-           :text " Maps index URL: "}
-          {:fx/type :choice-box
-           :value (str maps-index-url)
-           :items [http/springfiles-maps-url
-                   (str http/springfightclub-root "/maps")]
-           :on-value-changed {:event/type ::maps-index-change}}
-          {:fx/type :button
-           :on-action {:event/type ::maps-index-change
-                       :maps-index-url maps-index-url}
-           :graphic
-           {:fx/type font-icon/lifecycle
-            :icon-literal "mdi-refresh:16:white"}}]}
-        {:fx/type :table-view
-         :column-resize-policy :constrained ; TODO auto resize
-         :items (or map-files-cache [])
-         :columns
-         [{:fx/type :table-column
-           :text "Filename"
-           :cell-value-factory identity
-           :cell-factory
-           {:fx/cell-type :table-cell
-            :describe
-            (fn [i]
-              {:text (str (:filename i))})}}
-          {:fx/type :table-column
-           :text "URL"
-           :cell-value-factory identity
-           :cell-factory
-           {:fx/cell-type :table-cell
-            :describe
-            (fn [i]
-              {:text (str (:url i))})}}
-          {:fx/type :table-column
-           :text "Date"
-           :cell-value-factory identity
-           :cell-factory
-           {:fx/cell-type :table-cell
-            :describe
-            (fn [i]
-              {:text (str (:date i))})}}
-          {:fx/type :table-column
-           :text "Size"
-           :cell-value-factory identity
-           :cell-factory
-           {:fx/cell-type :table-cell
-            :describe
-            (fn [i]
-              {:text (str (:size i))})}}
-          {:fx/type :table-column
-           :text "Download"
-           :cell-value-factory identity
-           :cell-factory
-           {:fx/cell-type :table-cell
-            :describe
-            (fn [{:keys [filename url]}]
-              (if filename
-                (let [url (str maps-index-url "/" url)
-                      download (get http-download url)
-                      dest (io/file (fs/download-dir) "maps" filename)]
-                  (merge
-                    {:text (str (:message download))
-                     :style {:-fx-font-family "monospace"}}
-                    (cond
-                      (and (not (:running download))
-                           (file-exists? file-cache dest))
-                      {:graphic
-                       {:fx/type font-icon/lifecycle
-                        :icon-literal "mdi-check:16:white"}}
-                      :else
-                      {:graphic
-                       {:fx/type :button
-                        :on-action {:event/type ::http-download
-                                    :url url
-                                    :dest dest}
-                        :graphic
-                        {:fx/type font-icon/lifecycle
-                         :icon-literal "mdi-download:16:white"}}})))
-                {:text "-"}))}}]}]}}}))
-
 
 (defn main-window-on-close-request
   [standalone e]
@@ -4734,13 +4453,8 @@
     (merge
       {:fx/type rapid-download-window}
       (select-keys state
-        [:engine-version :engines :rapid-download :rapid-repo :rapid-repos :rapid-versions-cached
+        [:engine-version :engines :rapid-download :rapid-filter :rapid-repo :rapid-repos :rapid-versions
          :rapid-data-by-hash :sdp-files-cached :show-rapid-downloader]))
-    (merge
-      {:fx/type http-download-window}
-      (select-keys state
-        [:engine-branch :engine-versions-cached :engines :extracting :file-cache :http-download :map-files-cache
-         :maps-index-url :mod-files-cache :mods-index-url :show-http-downloader]))
     {:fx/type :stage
      :showing pop-out-battle
      :title "alt-spring-lobby Battle"
