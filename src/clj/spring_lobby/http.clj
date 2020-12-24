@@ -2,7 +2,6 @@
   "Resources for "
   (:require
     [clj-http.client :as http]
-    ;[clojure.core.memoize :as mem]
     [clojure.java.io :as io]
     [clojure.string :as string]
     [clojure.xml :as xml]
@@ -30,6 +29,9 @@
 
 (def springlauncher-root
   "https://content.spring-launcher.com")
+
+(def bar-spring-releases-url
+  "https://api.github.com/repos/beyond-all-reason/spring/releases")
 
 
 (defn- by-tag [element tag]
@@ -163,6 +165,16 @@
             (first (string/split version #"\s"))
             "_" suffix ".7z")))))
 
+(def engine-archive-re
+  #"^spring_(\{\w+\})?([^_]*)_([0-9a-z\-]+)\.7z$")
+
+(defn engine-archive?
+  "Returns true if the given filename appears to be a spring engine archive, false otherwise."
+  [filename]
+  (boolean
+    (re-find engine-archive-re filename)))
+
+
 (defn engine-path
   "Returns the path to the Spring archive to download for this system."
   ([version]
@@ -182,11 +194,6 @@
     (let [engine-branch (detect-engine-branch engine-version)
           archive-path (engine-path engine-branch engine-version)]
       (str springrts-buildbot-root "/" engine-branch "/" archive-path))))
-
-
-(defn map-url [map-name]
-  (when map-name
-    (str springfiles-maps-url "/" (fs/map-filename map-name))))
 
 
 (defn- tag-content
@@ -244,28 +251,6 @@
                  :resource-updated now})))
           (filter :resource-type)))))
 
-#_
-(def springlauncher-links
-  (mem/ttl (partial get-springlauncher-root) :ttl/threshold 3600000))
-
-#_
-(defn springlauncher-engine-url [engine-version]
-  (let [engine-archive (engine-archive engine-version)]
-    (->> (springlauncher-links)
-         (filter (comp #(clojure.string/starts-with? % "engines/")))
-         (remove #{"engines/"})
-         (filter (comp #(and % engine-archive
-                             (clojure.string/ends-with? % engine-archive))))
-         first
-         (str springlauncher-root "/"))))
-
-#_
-(defn engine-url
-  "Returns the url for the archive for the given engine version."
-  [engine-version]
-  (or (springlauncher-engine-url engine-version)
-      (springrts-engine-url engine-version)))
-
 (defn engine-download-file [engine-version]
   (when engine-version
     (io/file (fs/download-dir) "engine" (engine-archive engine-version))))
@@ -296,9 +281,6 @@
                :resource-date date
                :resource-updated now}))))))
 
-
-(defn- trim-trailing [url]
-  (string/replace url #"/$" ""))
 
 (defn- urls [files]
   (->> files
@@ -331,7 +313,7 @@
                      (let [files (->> (springrts-buildbot-files [(str branch version platform)])
                                       (remove link?)
                                       (filter (every-pred :filename :url))
-                                      (filter (comp seven-zip? :filename)))]
+                                      (filter (comp engine-archive? :filename)))]
                        (map
                          (fn [{:keys [filename url size date]}]
                            {:download-source-name download-source-name
@@ -346,9 +328,49 @@
              versions)))
       branches)))
 
-#_
-(springrts-buildbot-files ["maintenance/"])
-#_
-(springrts-buildbot-files ["maintenance/104.0.1-1560-g50390f6/"])
-#_
-(springrts-buildbot-files ["maintenance/104.0.1-1560-g50390f6/win32/"])
+
+(def bar-engine-re
+  #"^spring_bar_\.BAR\.([^_]*)_([0-9a-z\-]+)\.7z$")
+
+(defn bar-engine-filename?
+  [filename]
+  (boolean
+    (re-find bar-engine-re filename)))
+
+(def bar-platforms
+  {"linux64" "linux-64"
+   "win32" "windows-32"})
+
+(defn bar-engine-filename
+  ([version]
+   (bar-engine-filename version (fs/platform)))
+  ([version platform]
+   (let [bar-platform (get bar-platforms platform)]
+     (str "spring_bar_.BAR." (first (string/split version #"\s"))
+          "_" bar-platform "-minimal-portable.7z"))))
+
+
+(defn get-github-release-engine-downloadables
+  [{:keys [download-source-name url]}]
+  (let [now (u/curr-millis)]
+    (->> (http/get url {:as :auto})
+         :body
+         (mapcat
+           (fn [{:keys [assets html_url]}]
+             (map
+               (fn [{:keys [browser_download_url created_at]}]
+                 {:release-url html_url
+                  :asset-url browser_download_url
+                  :created-at created_at})
+               assets)))
+         (map
+           (fn [{:keys [asset-url created-at]}]
+             (let [decoded-url (u/decode asset-url)
+                   filename (filename decoded-url)]
+               {:download-url asset-url
+                :resource-filename filename
+                :resource-type (when (bar-engine-filename? filename)
+                                 :spring-lobby/engine)
+                :resource-date created-at
+                :download-source-name download-source-name
+                :resource-updated now}))))))

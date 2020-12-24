@@ -4,6 +4,7 @@
     [clj-http.client :as clj-http]
     [cljfx.api :as fx]
     [cljfx.component :as fx.component]
+    [clojure.contrib.humanize :as humanize]
     [cljfx.ext.node :as fx.ext.node]
     [cljfx.ext.table-view :as fx.ext.table-view]
     [cljfx.lifecycle :as fx.lifecycle]
@@ -40,6 +41,7 @@
     (javafx.embed.swing SwingFXUtils)
     (javafx.scene.input KeyCode)
     (javafx.scene.paint Color)
+    (javafx.stage WindowEvent)
     (manifold.stream SplicedStream)
     (org.apache.commons.io.input CountingInputStream))
   (:gen-class))
@@ -97,9 +99,9 @@
   {::update-engine 4
    ::update-map 4
    ::update-mod 4
-   ::import 4
-   ::http-downloadable 4
-   ::rapid-downloadable 4})
+   ::import 5
+   ::http-downloadable 5
+   ::rapid-downloadable 5})
 
 (defn task-priority [{::keys [task-priority task-type]}]
   (or task-priority
@@ -111,48 +113,6 @@
 
 (defn initial-file-events []
   (clojure.lang.PersistentQueue/EMPTY))
-
-
-(defn initial-state []
-  (merge
-    (slurp-app-edn "config.edn")
-    (slurp-app-edn "maps.edn")
-    (slurp-app-edn "engines.edn")
-    (slurp-app-edn "mods.edn")
-    (slurp-app-edn "importables.edn")
-    (slurp-app-edn "downloadables.edn")
-    {:file-events (initial-file-events)
-     :tasks (initial-tasks)}))
-
-
-(def ^:dynamic *state (atom {}))
-
-
-(defn spit-app-edn
-  "Writes the given data as edn to the given file in the application directory."
-  [data filename]
-  (let [app-root (io/file (fs/app-root))
-        file (io/file app-root filename)]
-    (when-not (fs/exists app-root)
-      (.mkdirs app-root))
-    (spit file (with-out-str (pprint data)))))
-
-
-(defn add-watch-state-to-edn
-  "Adds a watcher to *state that writes the data, returned by applying filter-fn, when that data
-  changes, to output-filename in the app directory."
-  [state-atom watcher-kw filter-fn output-filename]
-  (add-watch state-atom
-    watcher-kw
-    (fn [_k _ref old-state new-state]
-      (try
-        (let [old-data (filter-fn old-state)
-              new-data (filter-fn new-state)]
-          (when (not= old-data new-data)
-            (log/debug "Updating" output-filename)
-            (spit-app-edn new-data output-filename)))
-        (catch Exception e
-          (log/error e "Error in" watcher-kw "state watcher"))))))
 
 
 (def config-keys
@@ -174,11 +134,6 @@
 (defn select-mods [state]
   (select-keys state [:mods]))
 
-(defn select-download [state]
-  (select-keys state
-    [:engine-versions-cache :map-files-cache
-     :engine-branch :maps-index-url :rapid-repo :mods-index-url]))
-
 (defn select-importables [state]
   (select-keys state
     [:importables-by-path]))
@@ -187,9 +142,58 @@
   (select-keys state
     [:downloadables-by-url :downloadables-last-updated]))
 
-(defn select-rapid [state]
-  (select-keys state
-    [:rapid-repo :rapid-repos :rapid-data-by-hash :rapid-data-by-version :rapid-versions]))
+
+(def state-to-edn
+  [{:select-fn select-config
+    :filename "config.edn"}
+   {:select-fn select-maps
+    :filename "maps.edn"}
+   {:select-fn select-engines
+    :filename "engines.edn"}
+   {:select-fn select-mods
+    :filename "mods.edn"}
+   {:select-fn select-importables
+    :filename "importables.edn"}
+   {:select-fn select-downloadables
+    :filename "downloadables.edn"}])
+
+
+(defn initial-state []
+  (merge
+    (apply
+      merge
+      (doall
+        (map (comp slurp-app-edn :filename) state-to-edn)))
+    {:file-events (initial-file-events)
+     :tasks (initial-tasks)}))
+
+
+(def ^:dynamic *state (atom {}))
+
+
+(defn spit-app-edn
+  "Writes the given data as edn to the given file in the application directory."
+  [data filename]
+  (let [app-root (io/file (fs/app-root))
+        file (io/file app-root filename)]
+    (when-not (fs/exists app-root)
+      (.mkdirs app-root))
+    (spit file (with-out-str (pprint data)))))
+
+
+(defn add-watch-state-to-edn
+  [state-atom]
+  (add-watch state-atom :state-to-edn
+    (fn [_k _ref old-state new-state]
+      (doseq [{:keys [select-fn filename]} state-to-edn]
+        (try
+          (let [old-data (select-fn old-state)
+                new-data (select-fn new-state)]
+            (when (not= old-data new-data)
+              (log/debug "Updating" filename)
+              (spit-app-edn new-data filename)))
+          (catch Exception e
+            (log/error e "Error in :state-to-edn for" filename "state watcher")))))))
 
 
 (defn read-map-data [maps map-name]
@@ -208,8 +212,6 @@
 (def ^java.io.File mods-cache-root
   (io/file (fs/app-root) "mods-cache"))
 
-(defn mod-cache-file [mod-name]
-  (io/file mods-cache-root (str mod-name ".edn")))
 
 (defn read-mod-data
   ([f]
@@ -222,21 +224,20 @@
          mod-name (spring/mod-name mod-data)]
      (assoc mod-data :mod-name mod-name))))
 
-#_
-(read-mod-data (io/file "/mnt/c/Users/craig/AppData/Local/Programs/Beyond-All-Reason/data/packages/ce1411570bf8ed64222a1ee241a22234.sdp"))
 
 (defn update-mod [state-atom file]
-  (let [mod-data (read-mod-data file {:modinfo-only false})
-        ;mod-name (:mod-name mod-data)
-        ;cache-file (mod-cache-file mod-name)
+  (let [path (fs/canonical-path file)
+        mod-data (try
+                   (read-mod-data file {:modinfo-only false})
+                   (catch Exception e
+                     (log/error e "Error reading mod data for" file)))
         mod-details (select-keys mod-data [:file :mod-name ::fs/source :git-commit-id])]
-    ;(log/info "Caching" mod-name "to" cache-file)
-    ;(spit cache-file (with-out-str (pprint mod-data)))
     (swap! state-atom update :mods
            (fn [mods]
-             (-> (remove (comp #{(fs/canonical-path (:file mod-details))} fs/canonical-path :file) mods)
-                 (conj mod-details)
-                 set)))
+             (set
+               (cond->
+                 (remove (comp #{path} fs/canonical-path :file) mods)
+                 mod-details (conj mod-details)))))
     mod-data))
 
 
@@ -257,13 +258,6 @@
   (when-let [[_all _mod-prefix git] (parse-mod-name-git mod-name)]
     git))
 
-#_
-(re-find #"(.+)\s([0-9a-f]+)$" "Beyond All Reason $VERSION")
-#_
-(re-find #"(.+)\s(\$VERSION)$" "Beyond All Reason $VERSION")
-#_
-(mod-name-sans-git "Beyond All Reason $VERSION")
-
 
 (defn select-debug [state]
   (select-keys state [:pop-out-battle]))
@@ -276,12 +270,7 @@
   "Adds all *state watchers."
   [state-atom]
   (remove-watch state-atom :debug)
-  (remove-watch state-atom :config)
-  (remove-watch state-atom :maps)
-  (remove-watch state-atom :engines)
-  (remove-watch state-atom :mods)
-  (remove-watch state-atom :importables)
-  (remove-watch state-atom :downloadables)
+  (remove-watch state-atom :state-to-edn)
   (remove-watch state-atom :battle-map-details)
   (remove-watch state-atom :battle-mod-details)
   (remove-watch state-atom :fix-missing-resource)
@@ -298,12 +287,7 @@
               (println new-only))))
         (catch Exception e
           (log/error e "Error in debug")))))
-  (add-watch-state-to-edn state-atom :config select-config "config.edn")
-  (add-watch-state-to-edn state-atom :maps select-maps "maps.edn")
-  (add-watch-state-to-edn state-atom :engines select-engines "engines.edn")
-  (add-watch-state-to-edn state-atom :mods select-mods "mods.edn")
-  (add-watch-state-to-edn state-atom :importables select-importables "importables.edn")
-  (add-watch-state-to-edn state-atom :downloadables select-downloadables "downloadables.edn")
+  (add-watch-state-to-edn state-atom)
   (add-watch state-atom :battle-map-details
     (fn [_k _ref old-state new-state]
       (try
@@ -1076,11 +1060,6 @@
 (defmethod event-handler ::print-state [_e]
   (pprint *state))
 
-(defmethod event-handler ::show-rapid-downloader [_e]
-  (swap! *state assoc :show-rapid-downloader true))
-
-(defmethod event-handler ::show-http-downloader [_e]
-  (swap! *state assoc :show-http-downloader true))
 
 (defmethod event-handler ::disconnect [_e]
   (let [state @*state]
@@ -1433,7 +1412,8 @@
        :desc
        {:fx/type :button
         :text "rapid"
-        :on-action {:event/type ::show-rapid-downloader}
+        :on-action {:event/type ::assoc
+                    :key :show-rapid-downloader}
         :graphic
         {:fx/type font-icon/lifecycle
          :icon-literal (str "mdi-download:16:white")}}}
@@ -2543,15 +2523,6 @@
       (catch Exception e
         (log/error e "Error nuking data dir")))))
 
-#_
-(-> user/*state deref :battle-map-details keys)
-
-#_
-(->> user/*state deref :importables-by-path
-     vals
-     ;(filter (comp #{::map} :resource-type))
-     (filter (comp #{"Claymore_v2"} :resource-name)))
-
 (defn git-repo-url [battle-modname]
   (cond
     (string/starts-with? battle-modname "Beyond All Reason")
@@ -2566,16 +2537,19 @@
       (when (and engine-version resource-filename)
         (or (= engine-version resource-filename)
             (= (http/engine-archive engine-version)
-               resource-filename)))))
+               resource-filename)
+            (= (http/bar-engine-filename engine-version) resource-filename)))))
 
+#_
+(http/engine-archive "104.0.1-1695-gbd6b256 BAR")
 #_
 (->> user/*state
      deref
      :downloadables-by-url
      vals
-     (filter (comp #{::engine} :resource-type))
-     (filter (partial could-be-this-engine? "103.0"))
-     first)
+     ;(filter (comp (partial could-be-this-engine? "104.0.1-1563-g66cad77 maintenance"))))
+     (filter (comp (partial could-be-this-engine? "104.0.1-1707-gc0fc18e BAR"))))
+
 
 (defn normalize-mod [mod-name-or-filename]
   (-> mod-name-or-filename
@@ -2583,11 +2557,6 @@
       (string/replace #"\s+" "_")
       (string/replace #"-" "_")
       (string/replace #"\.sd[7z]$" "")))
-
-#_
-(normalize-mod "Balanced Annihilation V9.79.4")
-#_
-(normalize-mod "balanced_annihilation-v9.79.4.sdz")
 
 (defn could-be-this-mod?
   "Returns true if this resource might be the mod with the given name, by magic, false otherwise."
@@ -2597,14 +2566,6 @@
         (= (normalize-mod mod-name)
            (normalize-mod resource-filename)))))
 
-#_
-(->> user/*state
-     deref
-     :downloadables-by-url
-     vals
-     (filter (comp #{::mod} :resource-type))
-     (filter (partial could-be-this-mod? "Balanced Annihilation V9.79.4"))
-     first)
 
 (defn normalize-map [map-name-or-filename]
   (some-> map-name-or-filename
@@ -2621,6 +2582,14 @@
         (= (normalize-map map-name)
            (normalize-map resource-filename)))))
 
+
+(defn download-progress
+  [{:keys [current total]}]
+  (if (and current total)
+    (str (u/format-bytes current)
+         " / "
+         (u/format-bytes total))
+    "-"))
 
 (def battle-view-keys
   [:archiving :battles :battle :battle-map-details :battle-mod-details :bot-name
@@ -2651,7 +2620,6 @@
         engine-version (:battle-version battle-details)
         engine-details (spring/engine-details engines engine-version)
         engine-file (:file engine-details)
-        engine-download-file (http/engine-download-file engine-version) ; TODO duplicate of downloadable?
         bots (fs/bots engine-file)
         minimap-image (case minimap-type
                         "metalmap" (:metalmap-image smf)
@@ -2784,14 +2752,14 @@
                        [{:severity severity
                          :text "download"
                          :human-text (if in-progress
-                                       (str (:current download) " / " (:total download))
+                                       (download-progress download)
                                        (if downloadable
                                          (if dest-exists
                                            (str "Downloaded " (fs/filename dest))
                                            (str "Download from " (:download-source-name downloadable)))
                                          (str "No download for " battle-map)))
                          :tooltip (if in-progress
-                                    (str "Downloading " (:current download) " / " (:total download))
+                                    (str "Downloading " (download-progress download))
                                     (if dest-exists
                                       (str "Downloaded to " (fs/canonical-path dest))
                                       (str "Download " url)))
@@ -2970,36 +2938,37 @@
                          download (get http-download url)
                          in-progress (:running download)
                          dest (resource-dest downloadable)
+                         dest-path (fs/canonical-path dest)
                          dest-exists (file-exists? file-cache dest)
                          severity (if dest-exists 0 2)]
-                     [{:severity severity
-                       :text "download"
-                       :human-text (if in-progress
-                                     (str (:current download) " / " (:total download))
-                                     (if downloadable
-                                       (if dest-exists
-                                         (str "Downloaded " (fs/filename dest))
-                                         (str "Download from " (:download-source-name downloadable)))
-                                       (str "No download for " engine-version)))
-                       :tooltip (if in-progress
-                                  (str "Downloading " (:current download) " / " (:total download))
-                                  (if dest-exists
-                                    (str "Downloaded to " (fs/canonical-path dest))
-                                    (str "Download " url)))
-                       :in-progress in-progress
-                       :action (when (and downloadable (not dest-exists))
-                                 {:event/type ::http-downloadable
-                                  :downloadable downloadable})}]))
-                 (when (and (not engine-details)
-                            (file-exists? file-cache engine-download-file))
-                   [{:severity 2
-                     :text "extract"
-                     :in-progress (get extracting engine-download-file)
-                     :human-text "Extract engine archive"
-                     :tooltip (str "Click to extract " engine-download-file)
-                     :action {:event/type ::extract-7z
-                              :file engine-download-file
-                              :dest (io/file (fs/isolation-dir) "engine" engine-version)}}])
+                     (concat
+                       [{:severity severity
+                         :text "download"
+                         :human-text (if in-progress
+                                       (download-progress download)
+                                       (if downloadable
+                                         (if dest-exists
+                                           (str "Downloaded " (fs/filename dest))
+                                           (str "Download from " (:download-source-name downloadable)))
+                                         (str "No download for " engine-version)))
+                         :tooltip (if in-progress
+                                    (str "Downloading " (download-progress download))
+                                    (if dest-exists
+                                      (str "Downloaded to " (fs/canonical-path dest))
+                                      (str "Download " url)))
+                         :in-progress in-progress
+                         :action (when (and downloadable (not dest-exists))
+                                   {:event/type ::http-downloadable
+                                    :downloadable downloadable})}]
+                       (when dest-exists
+                         [{:severity 2
+                           :text "extract"
+                           :in-progress (get extracting dest)
+                           :human-text "Extract engine archive"
+                           :tooltip (str "Click to extract " dest-path)
+                           :action {:event/type ::extract-7z
+                                    :file dest
+                                    :dest (io/file (fs/isolation-dir) "engine" (:resource-filename downloadable))}}]))))
                  (when-not engine-details
                    (let [importable (some->> importables-by-path
                                              vals
@@ -3675,11 +3644,12 @@
 (defmethod task-handler ::update-importable [{:keys [importable]}]
   (update-importable importable))
 
-(defn importable-data [resource-type import-source-name resource-file]
+(defn importable-data [resource-type import-source-name now resource-file]
   {:resource-type resource-type
    :import-source-name import-source-name
    :resource-file resource-file
-   :resource-filename (fs/filename resource-file)})
+   :resource-filename (fs/filename resource-file)
+   :resource-updated now})
 
 (defmethod task-handler ::scan-imports
   [{root :file import-source-name :import-source-name}]
@@ -3688,10 +3658,11 @@
         mod-files (fs/mod-files root)
         engine-dirs (fs/engine-dirs root)
         sdp-files (rapid/sdp-files root)
+        now (u/curr-millis)
         importables (concat
-                      (map (partial importable-data ::map import-source-name) map-files)
-                      (map (partial importable-data ::mod import-source-name) (concat mod-files sdp-files))
-                      (map (partial importable-data ::engine import-source-name) engine-dirs))
+                      (map (partial importable-data ::map import-source-name now) map-files)
+                      (map (partial importable-data ::mod import-source-name now) (concat mod-files sdp-files))
+                      (map (partial importable-data ::engine import-source-name now) engine-dirs))
         importables-by-path (->> importables
                                  (map (juxt (comp fs/canonical-path :resource-file) identity))
                                  (into {}))]
@@ -3723,8 +3694,10 @@
     :resources-fn http/get-springlauncher-downloadables}
    {:download-source-name "SpringRTS buildbot"
     :url http/springrts-buildbot-root
-    :resources-fn http/crawl-springrts-engine-downloadables}])
-  ; TODO bar github releases crawling for engines
+    :resources-fn http/crawl-springrts-engine-downloadables}
+   {:download-source-name "BAR GitHub spring"
+    :url http/bar-spring-releases-url
+    :resources-fn http/get-github-release-engine-downloadables}])
 
 
 (def downloadable-update-cooldown
@@ -3793,13 +3766,44 @@
 
 (defn import-window
   [{:keys [copying file-cache import-filter import-type import-source-name importables-by-path
-           show-importer]}]
+           show-importer show-stale tasks]}]
   (let [import-source (->> import-sources
                            (filter (comp #{import-source-name} :import-source-name))
-                           first)]
+                           first)
+        now (u/curr-millis)
+        importables (->> (or (vals importables-by-path) [])
+                         (filter (fn [{:keys [resource-updated]}]
+                                   (if show-stale
+                                     true
+                                     (and resource-updated
+                                          (< (- now downloadable-update-cooldown) resource-updated)))))
+                         (filter (fn [importable]
+                                   (if import-source-name
+                                     (= import-source-name (:import-source-name importable))
+                                     true)))
+                         (filter (fn [{:keys [resource-file resource-name]}]
+                                   (if-not (string/blank? import-filter)
+                                     (let [path (fs/canonical-path resource-file)]
+                                       (or (and path
+                                                (string/includes?
+                                                  (string/lower-case path)
+                                                  (string/lower-case import-filter)))
+                                           (and resource-name
+                                                (string/includes?
+                                                  (string/lower-case resource-name)
+                                                  (string/lower-case import-filter)))))
+                                     true)))
+                         (filter (fn [{:keys [resource-type]}]
+                                   (if import-type
+                                     (= import-type resource-type)
+                                     true))))
+        import-tasks (->> tasks
+                          (filter (comp #{::import} ::task-type))
+                          (map (comp fs/canonical-path :resource-file :importable))
+                          set)]
     {:fx/type :stage
-     :x 400
-     :y 400
+     :x 300
+     :y 300
      :showing show-importer
      :title "alt-spring-lobby Importer"
      :on-close-request (fn [^javafx.stage.WindowEvent e]
@@ -3862,7 +3866,25 @@
                             :file (:file import-source)}
                 :graphic
                 {:fx/type font-icon/lifecycle
-                 :icon-literal "mdi-folder:16:white"}}}]))}
+                 :icon-literal "mdi-folder:16:white"}}}])
+           [{:fx/type fx.ext.node/with-tooltip-props
+             :props
+             {:tooltip
+              {:fx/type :tooltip
+               :show-delay [10 :ms]
+               :style {:-fx-font-size 14}
+               :text "Hide downloadables not discovered in the last polling cycle, default 24h"}}
+             :desc
+             {:fx/type :h-box
+              :alignment :center-left
+              :children
+              [{:fx/type :check-box
+                :selected (boolean show-stale)
+                :h-box/margin 8
+                :on-selected-changed {:event/type ::assoc
+                                      :key :show-stale}}
+               {:fx/type :label
+                :text "Show stale artifacts"}]}}])}
         {:fx/type :h-box
          :alignment :center-left
          :style {:-fx-font-size 16}
@@ -3918,32 +3940,22 @@
                 :graphic
                 {:fx/type font-icon/lifecycle
                  :icon-literal "mdi-close:16:white"}}}]))}
+        {:fx/type :label
+         :text (str (count importables) " artifacts")}
         {:fx/type :table-view
          :column-resize-policy :constrained ; TODO auto resize
          :v-box/vgrow :always
-         :items (->> (or (vals importables-by-path) [])
-                     (filter (fn [importable]
-                               (if import-source-name
-                                 (= import-source-name (:import-source-name importable))
-                                 true)))
-                     (filter (fn [{:keys [resource-file resource-name]}]
-                               (if-not (string/blank? import-filter)
-                                 (let [path (fs/canonical-path resource-file)]
-                                   (or (and path
-                                            (string/includes?
-                                              (string/lower-case path)
-                                              (string/lower-case import-filter)))
-                                       (and resource-name
-                                            (string/includes?
-                                              (string/lower-case resource-name)
-                                              (string/lower-case import-filter)))))
-                                 true)))
-                     (filter (fn [{:keys [resource-type]}]
-                               (if import-type
-                                 (= import-type resource-type)
-                                 true))))
+         :items importables
          :columns
          [{:fx/type :table-column
+           :text "Last Seen Ago"
+           :cell-value-factory identity
+           :cell-factory
+           {:fx/cell-type :table-cell
+            :describe (fn [{:keys [resource-updated]}]
+                          (when resource-updated
+                            {:text (str (humanize/duration (- now resource-updated)))}))}}
+          {:fx/type :table-column
            :text "Source"
            :cell-value-factory identity
            :cell-factory
@@ -3955,12 +3967,6 @@
            :cell-factory
            {:fx/cell-type :table-cell
             :describe (comp import-type-cell :resource-type)}}
-          {:fx/type :table-column
-           :text "Name"
-           :cell-value-factory identity
-           :cell-factory
-           {:fx/cell-type :table-cell
-            :describe (fn [i] {:text (str (:resource-name i))})}}
           {:fx/type :table-column
            :text "Path"
            :cell-value-factory identity
@@ -3976,26 +3982,33 @@
             (fn [importable]
               (let [source-path (some-> importable :resource-file fs/canonical-path)
                     dest-path (some-> importable resource-dest fs/canonical-path)
-                    disable (boolean
-                              (or (-> copying (get source-path) :status) ; TODO standard fn
-                                  (file-exists? file-cache source-path)
-                                  (-> copying (get dest-path) :status) ; TODO standard fn
-                                  (file-exists? file-cache dest-path)))]
+                    copying (or (-> copying (get source-path) :status)
+                                (-> copying (get dest-path) :status))
+                    in-progress (boolean
+                                  (or (contains? import-tasks source-path)
+                                      copying))]
                 {:text ""
                  :graphic
-                 {:fx/type :button
-                  :disable disable
-                  :tooltip
-                  {:fx/type :tooltip
-                   :show-delay [10 :ms]
-                   :text (str "Copy to " dest-path)}
-                  :on-action {:event/type ::add-task
-                              :task
-                              {::task-type ::import
-                               :importable importable}}
-                  :graphic
-                  {:fx/type font-icon/lifecycle
-                   :icon-literal "mdi-content-copy:16:white"}}}))}}]}]}}}))
+                 (if (file-exists? file-cache dest-path)
+                   {:fx/type font-icon/lifecycle
+                    :icon-literal "mdi-check:16:white"}
+                   {:fx/type :button
+                    :text (cond
+                            (contains? import-tasks source-path) "queued"
+                            copying "copying"
+                            :else "")
+                    :disable in-progress
+                    :tooltip
+                    {:fx/type :tooltip
+                     :show-delay [10 :ms]
+                     :text (str "Copy to " dest-path)}
+                    :on-action {:event/type ::add-task
+                                :task
+                                {::task-type ::import
+                                 :importable importable}}
+                    :graphic
+                    {:fx/type font-icon/lifecycle
+                     :icon-literal "mdi-content-copy:16:white"}})}))}}]}]}}}))
 
 
 (defmethod event-handler ::download-source-change
@@ -4014,14 +4027,41 @@
                         download-source))))
 
 (defn download-window
-  [{:keys [downloading file-cache download-filter download-type download-source-name downloadables-by-url
-           show-downloader]}]
+  [{:keys [download-filter download-type download-source-name downloadables-by-url file-cache
+           http-download show-downloader show-stale]}]
   (let [download-source (->> download-sources
                              (filter (comp #{download-source-name} :download-source-name))
-                             first)]
+                             first)
+        now (u/curr-millis)
+        downloadables (->> (or (vals downloadables-by-url) [])
+                           (filter :resource-type)
+                           (filter (fn [{:keys [resource-updated]}]
+                                     (if show-stale
+                                       true
+                                       (and resource-updated
+                                            (< (- now downloadable-update-cooldown) resource-updated)))))
+                           (filter (fn [downloadable]
+                                     (if download-source-name
+                                       (= download-source-name (:download-source-name downloadable))
+                                       true)))
+                           (filter (fn [{:keys [resource-filename resource-name]}]
+                                     (if download-filter
+                                       (or (and resource-filename
+                                                (string/includes?
+                                                  (string/lower-case resource-filename)
+                                                  (string/lower-case download-filter)))
+                                           (and resource-name
+                                                (string/includes?
+                                                  (string/lower-case resource-name)
+                                                  (string/lower-case download-filter))))
+                                       true)))
+                           (filter (fn [{:keys [resource-type]}]
+                                     (if download-type
+                                       (= download-type resource-type)
+                                       true))))]
     {:fx/type :stage
-     :x 400
-     :y 400
+     :x 200
+     :y 200
      :showing show-downloader
      :title "alt-spring-lobby Downloader"
      :on-close-request (fn [^javafx.stage.WindowEvent e]
@@ -4080,7 +4120,25 @@
                             :url (:url download-source)}
                 :graphic
                 {:fx/type font-icon/lifecycle
-                 :icon-literal "mdi-web:16:white"}}}]))}
+                 :icon-literal "mdi-web:16:white"}}}])
+           [{:fx/type fx.ext.node/with-tooltip-props
+             :props
+             {:tooltip
+              {:fx/type :tooltip
+               :show-delay [10 :ms]
+               :style {:-fx-font-size 14}
+               :text "Hide downloadables not discovered in the last polling cycle, default 24h"}}
+             :desc
+             {:fx/type :h-box
+              :alignment :center-left
+              :children
+              [{:fx/type :check-box
+                :selected (boolean show-stale)
+                :h-box/margin 8
+                :on-selected-changed {:event/type ::assoc
+                                      :key :show-stale}}
+               {:fx/type :label
+                :text "Show stale artifacts"}]}}])}
         {:fx/type :h-box
          :alignment :center-left
          :style {:-fx-font-size 16}
@@ -4136,32 +4194,22 @@
                 :graphic
                 {:fx/type font-icon/lifecycle
                  :icon-literal "mdi-close:16:white"}}}]))}
+        {:fx/type :label
+         :text (str (count downloadables) " artifacts")}
         {:fx/type :table-view
          :column-resize-policy :constrained ; TODO auto resize
          :v-box/vgrow :always
-         :items (->> (or (vals downloadables-by-url) [])
-                     (filter :resource-type)
-                     (filter (fn [downloadable]
-                               (if download-source-name
-                                 (= download-source-name (:download-source-name downloadable))
-                                 true)))
-                     (filter (fn [{:keys [resource-filename resource-name]}]
-                               (if download-filter
-                                 (or (and resource-filename
-                                          (string/includes?
-                                            (string/lower-case resource-filename)
-                                            (string/lower-case download-filter)))
-                                     (and resource-name
-                                          (string/includes?
-                                            (string/lower-case resource-name)
-                                            (string/lower-case download-filter))))
-                                 true)))
-                     (filter (fn [{:keys [resource-type]}]
-                               (if download-type
-                                 (= download-type resource-type)
-                                 true))))
+         :items downloadables
          :columns
          [{:fx/type :table-column
+           :text "Last Seen Ago"
+           :cell-value-factory identity
+           :cell-factory
+           {:fx/cell-type :table-cell
+            :describe (fn [{:keys [resource-updated]}]
+                          (when resource-updated
+                            {:text (str (humanize/duration (- now resource-updated)))}))}}
+          {:fx/type :table-column
            :text "Source"
            :cell-value-factory identity
            :cell-factory
@@ -4173,12 +4221,6 @@
            :cell-factory
            {:fx/cell-type :table-cell
             :describe (comp import-type-cell :resource-type)}}
-          {:fx/type :table-column
-           :text "Name"
-           :cell-value-factory identity
-           :cell-factory
-           {:fx/cell-type :table-cell
-            :describe (fn [i] {:text (str (:resource-name i))})}}
           {:fx/type :table-column
            :text "File"
            :cell-value-factory identity
@@ -4197,24 +4239,54 @@
            :cell-factory
            {:fx/cell-type :table-cell
             :describe
-            (fn [{:keys [download-url] :as downloadable}]
-              (let [dest-path (some-> downloadable resource-dest fs/canonical-path)
-                    disable (boolean
-                              (or (-> downloading (get download-url) :status) ; TODO standard fn
-                                  (file-exists? file-cache dest-path)))]
+            (fn [{:keys [download-url resource-filename] :as downloadable}]
+              (let [dest-file (some-> downloadable resource-dest)
+                    dest-path (some-> dest-file fs/canonical-path)
+                    download (get http-download download-url)
+                    in-progress (:running download)
+                    extract-file (when dest-file
+                                   (io/file (fs/isolation-dir) "engine" (fs/filename dest-file)))]
                 {:text ""
                  :graphic
-                 {:fx/type :button
-                  :disable disable
-                  :tooltip
-                  {:fx/type :tooltip
-                   :show-delay [10 :ms]
-                   :text (str "Download to " dest-path)}
-                  :on-action {:event/type ::http-downloadable
-                              :downloadable downloadable}
-                  :graphic
-                  {:fx/type font-icon/lifecycle
-                   :icon-literal "mdi-download:16:white"}}}))}}]}]}}}))
+                 (cond
+                   in-progress
+                   {:fx/type :label
+                    :text (str (download-progress download))}
+                   (and (not in-progress)
+                        (not (file-exists? file-cache dest-path)))
+                   {:fx/type :button
+                    :tooltip
+                    {:fx/type :tooltip
+                     :show-delay [10 :ms]
+                     :text (str "Download to " dest-path)}
+                    :on-action {:event/type ::http-downloadable
+                                :downloadable downloadable}
+                    :graphic
+                    {:fx/type font-icon/lifecycle
+                     :icon-literal "mdi-download:16:white"}}
+                   (and
+                        (file-exists? file-cache dest-path)
+                        dest-file
+                        (or
+                          (http/engine-archive? resource-filename)
+                          (http/bar-engine-filename? resource-filename))
+                        extract-file
+                        (not (file-exists? file-cache (fs/canonical-path extract-file))))
+                   {:fx/type :button
+                    :tooltip
+                    {:fx/type :tooltip
+                     :show-delay [10 :ms]
+                     :text (str "Extract to " extract-file)}
+                    :on-action
+                    {:event/type ::extract-7z
+                     :file dest-file
+                     :dest extract-file}
+                    :graphic
+                    {:fx/type font-icon/lifecycle
+                     :icon-literal "mdi-archive:16:white"}}
+                   :else
+                   {:fx/type font-icon/lifecycle
+                    :icon-literal "mdi-check:16:white"})}))}}]}]}}}))
 
 
 (defn rapid-download-window
@@ -4225,7 +4297,7 @@
     {:fx/type :stage
      :showing show-rapid-downloader
      :title "alt-spring-lobby Rapid Downloader"
-     :on-close-request (fn [^javafx.stage.WindowEvent e]
+     :on-close-request (fn [^WindowEvent e]
                          (swap! *state assoc :show-rapid-downloader false)
                          (.consume e))
      :width download-window-width
@@ -4304,11 +4376,15 @@
                                (string/starts-with? id (str rapid-repo ":"))
                                true)))
                          (filter
-                           (fn [{:keys [version]}]
+                           (fn [{:keys [version] :as i}]
                              (if-not (string/blank? rapid-filter)
-                               (string/includes?
-                                 (string/lower-case version)
-                                 (string/lower-case rapid-filter))
+                               (or
+                                 (string/includes?
+                                   (string/lower-case version)
+                                   (string/lower-case rapid-filter))
+                                 (string/includes?
+                                   (:hash i)
+                                   (string/lower-case rapid-filter)))
                                true))))
                     [])
          :columns
@@ -4511,7 +4587,7 @@
            :cell-factory
            {:fx/cell-type :table-cell
             :describe
-            (fn [i] {:text (-> i :file-size str)})}}
+            (fn [i] {:text (-> i :file-size u/format-bytes)})}}
           {:fx/type :table-column
            :text "Watch"
            :cell-value-factory identity
@@ -4530,32 +4606,7 @@
                  :engine-version (-> i :parsed-filename :engine-version)}
                 :graphic
                 {:fx/type font-icon/lifecycle
-                 :icon-literal "mdi-movie:16:white"}}})}}
-          #_
-          {:fx/type :table-column
-           :text "Parsed Filename"
-           :cell-value-factory identity
-           :cell-factory
-           {:fx/cell-type :table-cell
-            :describe
-            (fn [i]
-              {:text
-               (with-out-str
-                 (pprint
-                   (->> i :parsed-filename)))})}}
-          #_
-          {:fx/type :table-column
-           :text "Header"
-           :cell-value-factory identity
-           :cell-factory
-           {:fx/cell-type :table-cell
-            :describe
-            (fn [i]
-              {:text
-               (with-out-str
-                 (pprint
-                   (->> i
-                        :header)))})}}]}]}}}))
+                 :icon-literal "mdi-movie:16:white"}}})}}]}]}}}))
 
 (defn maps-window
   [{:keys [filter-maps-name maps show-maps]}]
@@ -4759,25 +4810,25 @@
        [(merge
           {:fx/type download-window}
           (select-keys state
-            [:downloading :download-filter :download-source-name :download-type
-             :downloadables-by-url :file-cache :show-downloader]))])
+            [:download-filter :download-source-name :download-type :downloadables-by-url :file-cache
+             :http-download :show-downloader :show-stale]))])
      (when show-importer
        [(merge
           {:fx/type import-window}
           (select-keys state
             [:copying :file-cache :import-filter :import-source-name :import-type
-             :importables-by-path :show-importer]))])
+             :importables-by-path :show-importer :show-stale :tasks]))])
      (when show-maps
        [(merge
           {:fx/type maps-window}
           (select-keys state
             [:filter-maps-name :maps :show-maps]))])
      (when show-rapid-downloader
-      (merge
-        {:fx/type rapid-download-window}
-        (select-keys state
-          [:engine-version :engines :rapid-download :rapid-filter :rapid-repo :rapid-repos :rapid-versions
-           :rapid-data-by-hash :sdp-files :show-rapid-downloader])))
+       [(merge
+          {:fx/type rapid-download-window}
+          (select-keys state
+            [:engine-version :engines :rapid-download :rapid-filter :rapid-repo :rapid-repos :rapid-versions
+             :rapid-data-by-hash :sdp-files :show-rapid-downloader]))])
      (when show-replays
        [(merge
           {:fx/type replays-window}
