@@ -1,13 +1,12 @@
-/.cpcache/
-/.nrepl-port
 /*.jar
-/pom.xml
 /*.log*
-/trace.edn
-
-# Calva stuff probably
 /.calva/
 /.classpath
+/.cpcache/
+/.nrepl-port
 /.project
 /.settings/
+/dist/
+/pom.xml
 /target/
+/trace.edn
