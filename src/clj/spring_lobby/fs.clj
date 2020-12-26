@@ -182,8 +182,7 @@
       (string/includes? os-name "Windows")
       (io/file user-home "AppData" "Local" "Programs" "Beyond-All-Reason" "data")
       :else
-      (throw (ex-info "Unable to determine Spring root for this system"
-                      {:sys-data sys-data})))))
+      (io/file user-home ".spring"))))
 
 (defn spring-root
   "Returns the root directory for Spring"
@@ -200,8 +199,7 @@
       (string/includes? os-name "Windows")
       (io/file user-home "Documents" "My Games" "Spring")
       :else
-      (throw (ex-info "Unable to determine Spring root for this system"
-                      {:sys-data sys-data})))))
+      (io/file user-home ".spring"))))
 
 (defn springlobby-root
   "Returns the root directory for Spring"
@@ -218,8 +216,7 @@
       (string/includes? os-name "Windows")
       (io/file user-home "AppData" "Roaming" "springlobby")
       :else
-      (throw (ex-info "Unable to determine Spring root for this system"
-                      {:sys-data sys-data})))))
+      (io/file user-home ".springlobby"))))
 
 (defn app-root
   "Returns the root directory for this application"
@@ -233,8 +230,7 @@
       (string/includes? os-name "Windows")
       (io/file user-home ".alt-spring-lobby")
       :else
-      (throw (ex-info "Unable to determine app root for this system"
-                      {:sys-data sys-data})))))
+      (io/file user-home ".alt-spring-lobby"))))
 
 
 (defn download-dir ^File
