@@ -1,7 +1,9 @@
 (ns spring-lobby.fs.smf
   (:require
     [byte-streams]
-    [org.clojars.smee.binary.core :as b])
+    [clojure.java.io :as io]
+    [org.clojars.smee.binary.core :as b]
+    [spring-lobby.util :as u])
   (:import
     (gr.zdimensions.jsquish Squish Squish$CompressionType)
     (java.awt.image BufferedImage)
@@ -37,33 +39,27 @@
     :tiles-offset :int-le
     :minimap-offset :int-le
     :metalmap-offset :int-le
-    :features-offset :int-le))
+    :features-offset :int-le
+    :extra-header-count :int-le))
+
+(def extra-header-protocol
+  (b/header
+    (b/ordered-map
+      :size :int-le
+      :type :int-le)
+    (fn [{:keys [size]}]
+      (b/blob :length size)) ; (- size 8) ; size of header
+    (constantly nil) ; TODO writing maps
+    :keep-header? true))
 
 ; https://github.com/AledLLEvans/BALobby/blob/7b018ba3e25d95e88b19e5c42446038a6adec5de/spring.lua#L166-L167
 (def map-protocol
   (b/header
     map-header
-    (fn [{:keys [map-width map-height minimap-offset metalmap-offset]}]
-      (let [metalmap-length (* (quot map-width 2) (quot map-height 2))]
-        (if (< minimap-offset metalmap-offset)
-          (let [before-minimap (- minimap-offset header-length)
-                pad-length (- metalmap-offset
-                              (+ minimap-length minimap-offset))]
-            (b/ordered-map
-              :prefix (b/blob :length before-minimap)
-              :minimap (b/blob :length minimap-length)
-              :pad (b/blob :length pad-length)
-              :metalmap (b/blob :length metalmap-length)
-              :rest (b/blob)))
-          (let [before-metalmap (- metalmap-offset header-length)
-                pad-length (- minimap-offset
-                              (+ metalmap-length metalmap-offset))]
-            (b/ordered-map
-              :prefix (b/blob :length before-metalmap)
-              :metalmap (b/blob :length metalmap-length)
-              :pad (b/blob :length pad-length)
-              :minimap (b/blob :length minimap-length)
-              :rest (b/blob))))))
+    (fn [{:keys [extra-header-count]}]
+      (b/ordered-map
+        :extra-headers (b/repeated extra-header-protocol :length extra-header-count)
+        :smf-body (b/blob)))
     (constantly nil) ; TODO writing maps
     :keep-header? true))
 
@@ -72,10 +68,6 @@
   [input-stream]
   (into (sorted-map)
     (b/decode map-header input-stream)))
-
-(defn decode-map
-  [input-stream]
-  (b/decode map-protocol input-stream))
 
 
 (defn int-bytes [i]
@@ -125,30 +117,6 @@
        (int-bytes 0)])))                      ; dwReserved2
 
 
-#_
-(defn minimap-bytes [input-stream]
-  (let [map-data (decode-map input-stream)
-        {:keys [body header]} map-data
-        {:keys [extra-headers heightmap htpad typemap minimap tilemap metalmap features]} body]
-    (concat-bytes minimap-header minimap)))
-
-
-#_
-(def jog-dds
-  (let [bs (minimap-bytes
-             (io/input-stream
-               (io/file "/mnt/c/Users/craig/Desktop/Dworld Acidic.smf")))]
-    (DDSImage/read (byte-streams/convert bs java.nio.ByteBuffer))))
-
-#_
-(def jme-dds
-  (let [bs (minimap-bytes
-             (io/input-stream
-               (io/file "/mnt/c/Users/craig/Desktop/Dworld Acidic.smf")))
-        ddsloader (DDSLoader.)]
-    (.load ddsloader (byte-streams/to-input-stream bs))))
-
-
 ; https://stackoverflow.com/a/18105498/984393
 (defn decompress-minimap [minimap-compressed]
   (let [rgba (Squish/decompressImage nil minimap-size minimap-size minimap-compressed Squish$CompressionType/DXT1)
@@ -158,6 +126,19 @@
       0 0 minimap-size minimap-size
       rgba)
     bi))
+
+(defn heightmap-image [map-width map-height heightmap-bytes]
+  (when (and (number? map-width)
+             (number? map-height)
+             heightmap-bytes)
+    (let [width (inc map-width)
+          height (inc map-height)
+          bi (BufferedImage. width height BufferedImage/TYPE_BYTE_GRAY)]
+      (.setDataElements
+        (.getRaster bi)
+        0 0 width height
+        heightmap-bytes)
+      bi)))
 
 (defn metalmap-image [map-width map-height metalmap-bytes]
   (when (and (number? map-width)
@@ -172,9 +153,40 @@
         metalmap-bytes)
       bi)))
 
-#_
-(def minimap
-  (let [is (io/input-stream
-             (io/file "/mnt/c/Users/craig/Desktop/Dworld Acidic.smf"))
-        {:keys [header body]} (decode-map is)]
-    (decompress-minimap minimap-compressed)))
+
+(defn subbytes [bs offset length]
+  (:data
+    (b/decode
+      (b/ordered-map
+        :offset (b/blob :length offset)
+        :data (b/blob :length length))
+      (io/input-stream bs))))
+
+; https://github.com/AledLLEvans/BALobby/blob/7b018ba3e25d95e88b19e5c42446038a6adec5de/spring.lua#L192-L202
+(defn decode-heightmap [bs]
+  (byte-array
+    (into-array
+      (map-indexed
+        (fn [_i [_a b]]
+          (byte b))
+        (partition 2 (seq bs))))))
+
+
+(defn decode-map
+  [input-stream]
+  (let [all-bytes (u/slurp-bytes input-stream)
+        header (b/decode map-header (io/input-stream all-bytes))
+        {:keys [heightmap-offset map-height map-width metalmap-offset minimap-offset]} header
+        heightmap-length (* 2 (inc map-width) (inc map-height))
+        metalmap-length (* (quot map-width 2) (quot map-height 2))
+        ^"[B" heightmap-bytes (decode-heightmap (subbytes all-bytes heightmap-offset heightmap-length))
+        minimap-bytes (subbytes all-bytes minimap-offset minimap-length)
+        metalmap-bytes (subbytes all-bytes metalmap-offset metalmap-length)]
+    {:header header
+     :body
+     {;:heightmap-bytes heightmap-bytes
+      :heightmap-image (heightmap-image map-width map-height heightmap-bytes)
+      ;:minimap-bytes minimap-bytes
+      :minimap-image (decompress-minimap minimap-bytes)
+      ;:metalmap-bytes metalmap-bytes
+      :metalmap-image (metalmap-image map-width map-height metalmap-bytes)}}))
