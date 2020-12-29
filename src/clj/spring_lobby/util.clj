@@ -1,6 +1,7 @@
 (ns spring-lobby.util
   (:require
     [clojure.edn :as edn]
+    [clojure.java.io :as io]
     [taoensso.timbre :as timbre]
     [taoensso.timbre.appenders.3rd-party.rotor :as rotor])
   (:import
@@ -73,3 +74,24 @@
                 :max-size 100000000
                 :backlog 9
                 :stacktrace-fonts {}})}}))
+
+
+(defmacro try-log
+  "Log message, try an operation, log any Exceptions with message, and log and rethrow Throwables."
+  [message & body]
+  `(try
+     (log/info (str "Start " ~message))
+     ~@body
+     (catch Exception e#
+       (log/error e# (str "Exception " ~message)))
+     (catch Throwable t#
+       (log/error t# (str "Error " ~message))
+       (throw t#))))
+
+; https://clojuredocs.org/clojure.core/slurp
+(defn slurp-bytes
+  "Slurp the bytes from a slurpable thing"
+  [x]
+  (with-open [out (java.io.ByteArrayOutputStream.)]
+    (io/copy (io/input-stream x) out)
+    (.toByteArray out)))
