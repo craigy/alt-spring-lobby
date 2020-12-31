@@ -24,8 +24,8 @@
           "None"
           "ChanServ"]
          (rest (handler/parse-adduser "ADDUSER ChanServ US None ChanServ"))))
-  (is (= ["ChanServ"
-          "US"
-          "None"
-          "ChanServ"]
+  (is (= ["[teh]host20"
+          "HU"
+          "2218"
+          "SPADS v0.12.18"]
          (rest (handler/parse-adduser "ADDUSER [teh]host20 HU 2218 SPADS v0.12.18")))))

@@ -102,7 +102,7 @@
 
 
 (defn parse-adduser [m]
-  (re-find #"\w+ ([^\s]+) (\w+) (\w+) (.*)" m))
+  (re-find #"\w+ ([^\s]+) ([^\s]+) ([^\s]+) (.+)" m))
 
 (defmethod handle "ADDUSER" [_c state m]
   (let [[_all username country user-id user-agent] (parse-adduser m)
