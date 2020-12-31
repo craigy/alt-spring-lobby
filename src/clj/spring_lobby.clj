@@ -952,21 +952,21 @@
       :describe (fn [i] {:text (str (:user-agent i))})}}]})
 
 
-(defmethod event-handler ::join-channel [{:keys [channel-name]}]
+(defmethod event-handler ::join-channel [{:keys [channel-name client]}]
   (future
     (try
-      (message/send-message (:client @*state) (str "JOIN " channel-name))
+      (message/send-message client (str "JOIN " channel-name))
       (catch Exception e
         (log/error e "Error joining channel" channel-name)))))
 
-(defmethod event-handler ::leave-channel [{:keys [channel-name]}]
+(defmethod event-handler ::leave-channel [{:keys [channel-name client]}]
   (future
     (try
-      (message/send-message (:client @*state) (str "LEAVE " channel-name))
+      (message/send-message client (str "LEAVE " channel-name))
       (catch Exception e
         (log/error e "Error leaving channel" channel-name)))))
 
-(defn channels-table [{:keys [channels my-channels]}]
+(defn channels-table [{:keys [channels client my-channels]}]
   {:fx/type :table-view
    :column-resize-policy :constrained ; TODO auto resize
    :items (->> (vals channels)
@@ -1005,10 +1005,12 @@
            (if (contains? my-channels channel-name)
              {:text "Leave"
               :on-action {:event/type ::leave-channel
-                          :channel-name channel-name}}
+                          :channel-name channel-name
+                          :client client}}
              {:text "Join"
               :on-action {:event/type ::join-channel
-                          :channel-name channel-name}}))})}}]})
+                          :channel-name channel-name
+                          :client client}}))})}}]})
 
 (defn update-disconnected! [state-atom]
   ;(log/debug (ex-info "stacktrace" {}) "Updating state after disconnect")
@@ -5070,7 +5072,7 @@
           (recur))
         (System/exit 0)))))
 
-(defn my-channels-pane [{:keys [channels my-channels]}]
+(defn my-channels-pane [{:keys [channels client my-channels]}]
   {:fx/type :tab-pane
    :tabs
    (map
@@ -5080,6 +5082,9 @@
                   :text (str channel-name)}
         :id channel-name
         :closable true
+        :on-close-request {:event/type ::leave-channel
+                           :channel-name channel-name
+                           :client client}
         :content
         {:fx/type :text-area
          :editable false
@@ -5162,7 +5167,7 @@
                    [(merge
                       {:fx/type my-channels-pane
                        :v-box/vgrow :always}
-                      (select-keys state [:channels :my-channels]))]))}
+                      (select-keys state [:channels :client :my-channels]))]))}
               {:fx/type :v-box
                :children
                [{:fx/type :label
@@ -5177,7 +5182,7 @@
                 (merge
                   {:fx/type channels-table
                    :v-box/vgrow :always}
-                  (select-keys state [:channels :my-channels]))]}]}
+                  (select-keys state [:channels :client :my-channels]))]}]}
             (merge
               {:fx/type battles-buttons}
               (select-keys state
