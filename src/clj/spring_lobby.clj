@@ -972,13 +972,18 @@
       (catch Exception e
         (log/error e "Error leaving channel" channel-name)))))
 
+(defn non-battle-channels
+  [channels]
+  (->> channels
+       (filter :channel-name)
+       (remove (comp #(string/starts-with? % "__battle__") :channel-name))))
+
 (defn channels-table [{:keys [channels client my-channels]}]
   {:fx/type :table-view
    :column-resize-policy :constrained ; TODO auto resize
    :items (->> (vals channels)
-               (filter :channel-name)
-               (sort-by :channel-name String/CASE_INSENSITIVE_ORDER)
-               (remove (comp #(string/starts-with? % "__battle__") :channel-name)))
+               non-battle-channels
+               (sort-by :channel-name String/CASE_INSENSITIVE_ORDER))
    :columns
    [{:fx/type :table-column
      :text "Channel"
@@ -5211,7 +5216,7 @@
                  :v-box/vgrow :always
                  :users users}
                 {:fx/type :label
-                 :text (str "Channels (" (count channels) ")")
+                 :text (str "Channels (" (->> channels vals non-battle-channels count) ")")
                  :style {:-fx-font-size 16}}
                 (merge
                   {:fx/type channels-table
