@@ -56,7 +56,7 @@
   [(str (io/resource "dark.css"))])
 
 (def main-window-width 1920)
-(def main-window-height 1020)
+(def main-window-height 1060)
 
 (def download-window-width 1600)
 (def download-window-height 800)
@@ -1002,6 +1002,7 @@
 (defn non-battle-channels
   [channels]
   (->> channels
+       (remove (comp string/blank? :channel-name))
        (remove (comp battle-channel-name? :channel-name))))
 
 (defn channels-table [{:keys [channels client my-channels]}]
@@ -3527,6 +3528,7 @@
              :v-box/vgrow :always}]}]}]}
       {:fx/type :v-box
        :alignment :top-left
+       :style {:-fx-min-height (+ minimap-size 100)}
        :children
        [
         {:fx/type :stack-pane
@@ -3617,97 +3619,94 @@
                            (.fillText gc text xc yc))
                          :else ; TODO choose starting rects
                          nil)))))})])}
-        {:fx/type :scroll-pane
-         :fit-to-width true
-         :content
-         {:fx/type :v-box
-          :children
-          [
-           {:fx/type :h-box
-            :alignment :center-left
-            :children
-            [
-             {:fx/type :label
-              :text (str " Size: "
-                         (when-let [{:keys [map-width map-height]} (-> battle-map-details :smf :header)]
-                           (str
-                             (when map-width (quot map-width 64))
-                             " x "
-                             (when map-height (quot map-height 64)))))}
-             {:fx/type :pane
-              :h-box/hgrow :always}
-             {:fx/type :combo-box
-              :value minimap-type
-              :items minimap-types
-              :on-value-changed {:event/type ::minimap-type-change}}]}
-           {:fx/type :h-box
-            :style {:-fx-max-width minimap-size}
-            :children
-            [{:fx/type map-list
-              :disable (not am-host)
-              :map-name battle-map
-              :maps maps
-              :map-input-prefix map-input-prefix
-              :on-value-changed {:event/type ::battle-map-change
-                                 :client client
-                                 :maps maps}}]}
-           {:fx/type :h-box
-            :alignment :center-left
-            :children
-            (concat
-              [{:fx/type :label
-                :alignment :center-left
-                :text " Start Positions: "}
-               {:fx/type :choice-box
-                :value startpostype
-                :items (map str (vals spring/startpostypes))
-                :disable (not am-host)
-                :on-value-changed {:event/type ::battle-startpostype-change}}]
-              (when (= "Choose before game" startpostype)
-                [{:fx/type :button
-                  :text "Reset"
-                  :disable (not am-host)
-                  :on-action {:event/type ::reset-start-positions}}]))}
-           {:fx/type :h-box
-            :alignment :center-left
-            :children
-            (concat
-              (when am-host
-                [{:fx/type :button
-                  :text "FFA"
-                  :on-action {:event/type ::battle-teams-ffa
-                              :battle battle
-                              :client client
-                              :users users
-                              :username username}}
-                 {:fx/type :button
-                  :text "2 teams"
-                  :on-action {:event/type ::battle-teams-2
-                              :battle battle
-                              :client client
-                              :users users
-                              :username username}}
-                 {:fx/type :button
-                  :text "3 teams"
-                  :on-action {:event/type ::battle-teams-3
-                              :battle battle
-                              :client client
-                              :users users
-                              :username username}}
-                 {:fx/type :button
-                  :text "4 teams"
-                  :on-action {:event/type ::battle-teams-4
-                              :battle battle
-                              :client client
-                              :users users
-                              :username username}}
-                 {:fx/type :button
-                  :text "Humans vs Bots"
-                  :on-action {:event/type ::battle-teams-humans-vs-bots
-                              :battle battle
-                              :client client
-                              :users users
-                              :username username}}]))}]}}]}]}))
+        {:fx/type :v-box
+         :children
+         [
+          {:fx/type :h-box
+           :alignment :center-left
+           :children
+           [
+            {:fx/type :label
+             :text (str " Size: "
+                        (when-let [{:keys [map-width map-height]} (-> battle-map-details :smf :header)]
+                          (str
+                            (when map-width (quot map-width 64))
+                            " x "
+                            (when map-height (quot map-height 64)))))}
+            {:fx/type :pane
+             :h-box/hgrow :always}
+            {:fx/type :combo-box
+             :value minimap-type
+             :items minimap-types
+             :on-value-changed {:event/type ::minimap-type-change}}]}
+          {:fx/type :h-box
+           :style {:-fx-max-width minimap-size}
+           :children
+           [{:fx/type map-list
+             :disable (not am-host)
+             :map-name battle-map
+             :maps maps
+             :map-input-prefix map-input-prefix
+             :on-value-changed {:event/type ::battle-map-change
+                                :client client
+                                :maps maps}}]}
+          {:fx/type :h-box
+           :alignment :center-left
+           :children
+           (concat
+             [{:fx/type :label
+               :alignment :center-left
+               :text " Start Positions: "}
+              {:fx/type :choice-box
+               :value startpostype
+               :items (map str (vals spring/startpostypes))
+               :disable (not am-host)
+               :on-value-changed {:event/type ::battle-startpostype-change}}]
+             (when (= "Choose before game" startpostype)
+               [{:fx/type :button
+                 :text "Reset"
+                 :disable (not am-host)
+                 :on-action {:event/type ::reset-start-positions}}]))}
+          {:fx/type :h-box
+           :alignment :center-left
+           :children
+           (concat
+             (when am-host
+               [{:fx/type :button
+                 :text "FFA"
+                 :on-action {:event/type ::battle-teams-ffa
+                             :battle battle
+                             :client client
+                             :users users
+                             :username username}}
+                {:fx/type :button
+                 :text "2 teams"
+                 :on-action {:event/type ::battle-teams-2
+                             :battle battle
+                             :client client
+                             :users users
+                             :username username}}
+                {:fx/type :button
+                 :text "3 teams"
+                 :on-action {:event/type ::battle-teams-3
+                             :battle battle
+                             :client client
+                             :users users
+                             :username username}}
+                {:fx/type :button
+                 :text "4 teams"
+                 :on-action {:event/type ::battle-teams-4
+                             :battle battle
+                             :client client
+                             :users users
+                             :username username}}
+                {:fx/type :button
+                 :text "Humans vs Bots"
+                 :on-action {:event/type ::battle-teams-humans-vs-bots
+                             :battle battle
+                             :client client
+                             :users users
+                             :username username}}]))}]}]}]}))
 
 
 (defmethod event-handler ::battle-startpostype-change
