@@ -749,6 +749,23 @@
              true)})]
     (fn [] (.close chimer))))
 
+(defn update-channels-chimer-fn [state-atom]
+  (log/info "Starting channels update chimer")
+  (let [chimer
+        (chime/chime-at
+          (chime/periodic-seq
+            (java-time/instant)
+            (java-time/duration 1 :minutes))
+          (fn [_chimestamp]
+            (when-let [{:keys [client]} @state-atom]
+              (log/info "Updating channel list")
+              (message/send-message client "CHANNELS")))
+          {:error-handler
+           (fn [e]
+             (log/error e "Error force updating resources")
+             true)})]
+    (fn [] (.close chimer))))
+
 
 (defmethod task-handler ::reconcile-engines [_]
   (reconcile-engines *state))
@@ -970,18 +987,22 @@
       (catch Exception e
         (log/error e "Error joining channel" channel-name)))))
 
-(defmethod event-handler ::leave-channel [{:keys [channel-name client]}]
+(defmethod event-handler ::leave-channel [{:keys [channel-name client] :fx/keys [event]}]
   (future
     (try
       (message/send-message client (str "LEAVE " channel-name))
       (catch Exception e
-        (log/error e "Error leaving channel" channel-name)))))
+        (log/error e "Error leaving channel" channel-name))))
+  (.consume event))
+
+(defn battle-channel-name? [channel-name]
+  (and channel-name
+       (string/starts-with? channel-name "__battle__")))
 
 (defn non-battle-channels
   [channels]
   (->> channels
-       (filter :channel-name)
-       (remove (comp #(string/starts-with? % "__battle__") :channel-name))))
+       (remove (comp battle-channel-name? :channel-name))))
 
 (defn channels-table [{:keys [channels client my-channels]}]
   {:fx/type :table-view
@@ -5118,7 +5139,7 @@
           :graphic {:fx/type :label
                     :text (str channel-name)}
           :id channel-name
-          :closable true
+          :closable (not (battle-channel-name? channel-name))
           :on-close-request {:event/type ::leave-channel
                              :channel-name channel-name
                              :client client}
@@ -5132,6 +5153,8 @@
               {:fx/type :text-area
                :v-box/vgrow :always
                :editable false
+               :scroll-top Double/MAX_VALUE
+               :wrap-text true
                :text (->> channel-details
                           :messages
                           reverse
@@ -5255,8 +5278,7 @@
                  :text (str "Channels (" (->> channels vals non-battle-channels count) ")")
                  :style {:-fx-font-size 16}}
                 (merge
-                  {:fx/type channels-table
-                   :v-box/vgrow :always}
+                  {:fx/type channels-table}
                   (select-keys state [:channels :client :my-channels]))]}]}
             (merge
               {:fx/type battles-buttons}
@@ -5359,7 +5381,8 @@
   [state-atom]
   (let [low-tasks-chimer (tasks-chimer-fn state-atom 1)
         high-tasks-chimer (tasks-chimer-fn state-atom 3)
-        force-update-chimer (force-update-chimer-fn state-atom)]
+        force-update-chimer (force-update-chimer-fn state-atom)
+        update-channels-chimer (update-channels-chimer-fn state-atom)]
     (add-watchers state-atom)
     (add-task! state-atom {::task-type ::reconcile-engines})
     (add-task! state-atom {::task-type ::reconcile-mods})
@@ -5367,7 +5390,7 @@
     (add-task! state-atom {::task-type ::update-rapid})
     (event-handler {:event/type ::update-downloadables})
     (event-handler {:event/type ::scan-imports})
-    {:chimers [low-tasks-chimer high-tasks-chimer force-update-chimer]}))
+    {:chimers [low-tasks-chimer high-tasks-chimer force-update-chimer update-channels-chimer]}))
 
 
 (defn -main [& _args]
