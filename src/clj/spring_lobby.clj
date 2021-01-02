@@ -5099,6 +5099,7 @@
 (defmethod event-handler ::send-message [{:keys [channel-name client message]}]
   (future
     (try
+      (swap! *state dissoc :message-draft)
       (message/send-message client (str "SAY " channel-name " " message))
       (catch Exception e
         (log/error e "Error sending message" message "to channel" channel-name)))))
@@ -5150,7 +5151,11 @@
                  :h-box/hgrow :always
                  :text (str message-draft)
                  :on-text-changed {:event/type ::assoc
-                                   :key :message-draft}}]}]}
+                                   :key :message-draft}
+                 :on-action {:event/type ::send-message
+                             :channel-name channel-name
+                             :client client
+                             :message message-draft}}]}]}
             {:fx/type :table-view
              :column-resize-policy :constrained ; TODO auto resize
              :items (->> users
