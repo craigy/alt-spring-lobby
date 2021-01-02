@@ -8,6 +8,8 @@
     [cljfx.ext.node :as fx.ext.node]
     [cljfx.ext.table-view :as fx.ext.table-view]
     [cljfx.lifecycle :as fx.lifecycle]
+    [cljfx.mutator :as fx.mutator]
+    [cljfx.prop :as fx.prop]
     clojure.data
     clojure.core.async
     [clojure.edn :as edn]
@@ -38,6 +40,8 @@
     [version-clj.core :as version])
   (:import
     (java.awt Desktop)
+    (java.time LocalDateTime)
+    (java.util TimeZone)
     (javafx.application Platform)
     (javafx.embed.swing SwingFXUtils)
     (javafx.scene.input KeyCode)
@@ -3010,8 +3014,7 @@
          [
           {:fx/type :v-box
            :children
-           [{:fx/type :h-box
-             :alignment :top-left
+           [{:fx/type :flow-pane
              :children
              [{:fx/type :button
                :text "Add Bot"
@@ -3024,25 +3027,38 @@
                            :bot-name bot-name
                            :bot-version bot-version
                            :client client}}
-              {:fx/type :text-field
-               :prompt-text "Bot Name"
-               :text (str bot-username)
-               :on-text-changed {:event/type ::change-bot-username}}
-              {:fx/type :label
-               :text " AI: "}
-              {:fx/type :choice-box
-               :value bot-name
-               :disable (empty? bot-names)
-               :on-value-changed {:event/type ::change-bot-name
-                                  :bots bots}
-               :items bot-names}
-              {:fx/type :label
-               :text " Version: "}
-              {:fx/type :choice-box
-               :value bot-version
-               :disable (string/blank? bot-name)
-               :on-value-changed {:event/type ::change-bot-version}
-               :items (or bot-versions [])}]}
+              {:fx/type :h-box
+               :alignment :center-left
+               :children
+               [{:fx/type :label
+                 :text " Bot Name: "}
+                {:fx/type :text-field
+                 :prompt-text "Bot Name"
+                 :text (str bot-username)
+                 :on-text-changed {:event/type ::change-bot-username}}]}
+              {:fx/type :h-box
+               :alignment :center-left
+               :children
+               [
+                {:fx/type :label
+                 :text " AI: "}
+                {:fx/type :choice-box
+                 :value bot-name
+                 :disable (empty? bot-names)
+                 :on-value-changed {:event/type ::change-bot-name
+                                    :bots bots}
+                 :items bot-names}]}
+              {:fx/type :h-box
+               :alignment :center-left
+               :children
+               [
+                {:fx/type :label
+                 :text " Version: "}
+                {:fx/type :choice-box
+                 :value bot-version
+                 :disable (string/blank? bot-name)
+                 :on-value-changed {:event/type ::change-bot-version}
+                 :items (or bot-versions [])}]}]}
             {:fx/type :h-box
              :alignment :center-left
              :children
@@ -3050,6 +3066,7 @@
                :text " Host IP: "}
               {:fx/type :text-field
                :text (-> battle :scripttags :game :hostip str)
+               :prompt-text " <override> "
                :on-text-changed {:event/type ::hostip-changed}}]}
             #_
             {:fx/type :h-box
@@ -5120,9 +5137,29 @@
   (future
     (try
       (swap! *state dissoc :message-draft)
-      (message/send-message client (str "SAY " channel-name " " message))
+      (if-let [[_all message] (re-find #"^/me (.*)$" message)]
+        (message/send-message client (str "SAYEX " channel-name " " message))
+        (message/send-message client (str "SAY " channel-name " " message)))
       (catch Exception e
         (log/error e "Error sending message" message "to channel" channel-name)))))
+
+
+; https://github.com/cljfx/cljfx/issues/51#issuecomment-583974585
+(def with-scroll-text-prop
+  (fx.lifecycle/make-ext-with-props
+   fx.lifecycle/dynamic
+   {:scroll-text (fx.prop/make
+                   (fx.mutator/setter
+                     (fn [text-area [txt auto-scroll]]
+                       (let [scroll-pos (if auto-scroll
+                                          ##Inf
+                                          (.getScrollTop text-area))]
+                         (doto text-area
+                           (.setText txt)
+                           (some-> .getParent .layout)
+                           (.setScrollTop scroll-pos)))))
+                  fx.lifecycle/scalar
+                  :default ["" 0])}))
 
 
 (defn my-channels-view [{:keys [channels client message-draft my-channels]}]
@@ -5133,7 +5170,23 @@
    (map
      (fn [[channel-name]]
        (let [channel-details (get channels channel-name)
-             users (:users channel-details)]
+             users (:users channel-details)
+             time-zone-id (.toZoneId (TimeZone/getDefault))
+             text (->> channel-details
+                       :messages
+                       reverse
+                       (map
+                         (fn [{:keys [ex text timestamp username]}]
+                           (str
+                             "["
+                             (java-time/format "HH:mm:ss" (LocalDateTime/ofInstant
+                                                            (java-time/instant timestamp)
+                                                            time-zone-id))
+                             "] "
+                             (if ex
+                               (str "* " username " " text)
+                               (str username ": " text)))))
+                       (string/join "\n"))]
          {:fx/type :tab
           :graphic {:fx/type :label
                     :text (str channel-name)}
@@ -5148,20 +5201,14 @@
            [{:fx/type :v-box
              :h-box/hgrow :always
              :children
-             [
-              {:fx/type :text-area
+             [{:fx/type with-scroll-text-prop
                :v-box/vgrow :always
-               :editable false
-               :scroll-top Double/MAX_VALUE
-               :wrap-text true
-               :text (->> channel-details
-                          :messages
-                          reverse
-                          (map
-                            (fn [{:keys [text username]}]
-                              (str username ": " text)))
-                          (string/join "\n"))
-               :style {:-fx-font-family "monospace"}}
+               :props {:scroll-text [text true]}
+               :desc
+               {:fx/type :text-area
+                :editable false
+                :wrap-text true
+                :style {:-fx-font-family "monospace"}}}
               {:fx/type :h-box
                :children
                [{:fx/type :button
