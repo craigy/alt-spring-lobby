@@ -5096,8 +5096,15 @@
   #p e
   (log/info e))
 
+(defmethod event-handler ::send-message [{:keys [channel-name client message]}]
+  (future
+    (try
+      (message/send-message client (str "SAY " channel-name " " message))
+      (catch Exception e
+        (log/error e "Error sending message" message "to channel" channel-name)))))
 
-(defn my-channels-view [{:keys [channels client my-channels]}]
+
+(defn my-channels-view [{:keys [channels client message-draft my-channels]}]
   {:fx/type :tab-pane
    :on-tabs-changed {:event/type ::my-channels-tab-action}
    :style {:-fx-font-size 16}
@@ -5117,18 +5124,33 @@
           :content
           {:fx/type :h-box
            :children
-           [
-            {:fx/type :text-area
+           [{:fx/type :v-box
              :h-box/hgrow :always
-             :editable false
-             :text (->> channel-details
-                        :messages
-                        reverse
-                        (map
-                          (fn [{:keys [text username]}]
-                            (str username ": " text)))
-                        (string/join "\n"))
-             :style {:-fx-font-family "monospace"}}
+             :children
+             [
+              {:fx/type :text-area
+               :editable false
+               :text (->> channel-details
+                          :messages
+                          reverse
+                          (map
+                            (fn [{:keys [text username]}]
+                              (str username ": " text)))
+                          (string/join "\n"))
+               :style {:-fx-font-family "monospace"}}
+              {:fx/type :h-box
+               :children
+               [{:fx/type :button
+                 :text "Send"
+                 :on-action {:event/type ::send-message
+                             :channel-name channel-name
+                             :client client
+                             :message message-draft}}
+                {:fx/type :text-field
+                 :h-box/hgrow :always
+                 :text (str message-draft)
+                 :on-text-changed {:event/type ::assoc
+                                   :key :message-draft}}]}]}
             {:fx/type :table-view
              :column-resize-policy :constrained ; TODO auto resize
              :items (->> users
@@ -5214,7 +5236,7 @@
                    [(merge
                       {:fx/type my-channels-view
                        :v-box/vgrow :always}
-                      (select-keys state [:channels :client :my-channels]))]))}
+                      (select-keys state [:channels :client :message-draft :my-channels]))]))}
               {:fx/type :v-box
                :children
                [{:fx/type :label
