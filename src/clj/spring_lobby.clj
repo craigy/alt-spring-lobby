@@ -5130,6 +5130,7 @@
              :children
              [
               {:fx/type :text-area
+               :v-box/vgrow :always
                :editable false
                :text (->> channel-details
                           :messages
