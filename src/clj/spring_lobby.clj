@@ -1434,8 +1434,8 @@
    "]" KeyCode/CLOSE_BRACKET
    "/" KeyCode/SLASH
    "\\" KeyCode/BACK_SLASH
-   "pageup" KeyCode/PAGE_UP
-   "pagedown" KeyCode/PAGE_DOWN})
+   "PAGEUP" KeyCode/PAGE_UP
+   "PAGEDOWN" KeyCode/PAGE_DOWN})
 
 (defn bind-key-to-javafx-keycode [bind-key-piece]
   (or (KeyCode/getKeyCode bind-key-piece)
@@ -1513,8 +1513,15 @@
          :cell-factory
          {:fx/cell-type :table-cell
           :describe
-          (fn [i]
-            {:text (str (:bind-comment i))})}}]}]}}})
+          (fn [{:keys [bind-comment]}]
+            (merge
+              {:text (str bind-comment)}
+              (when bind-comment
+                {:tooltip
+                 {:fx/type :tooltip
+                  :show-delay [10 :ms]
+                  :style {:-fx-font-size 15}
+                  :text (str bind-comment)}})))}}]}]}}})
 
 
 (defmethod event-handler ::username-change
