@@ -44,8 +44,10 @@
     (java.time LocalDateTime)
     (java.util TimeZone)
     (javafx.application Platform)
+    (javafx.beans.value ChangeListener)
     (javafx.embed.swing SwingFXUtils)
     (javafx.event Event)
+    (javafx.scene Node)
     (javafx.scene.control TextArea)
     (javafx.scene.input KeyCode KeyEvent ScrollEvent)
     (javafx.scene.paint Color)
@@ -927,6 +929,7 @@
    :column-resize-policy :constrained ; TODO auto resize
    :items (->> users
                vals
+               (filter :username)
                (sort-by :username String/CASE_INSENSITIVE_ORDER)
                vec)
    :columns
@@ -1001,15 +1004,11 @@
         (log/error e "Error leaving channel" channel-name))))
   (.consume event))
 
-(defn battle-channel-name? [channel-name]
-  (and channel-name
-       (string/starts-with? channel-name "__battle__")))
-
 (defn non-battle-channels
   [channels]
   (->> channels
        (remove (comp string/blank? :channel-name))
-       (remove (comp battle-channel-name? :channel-name))))
+       (remove (comp u/battle-channel-name? :channel-name))))
 
 (defn channels-table [{:keys [channels client my-channels]}]
   {:fx/type :table-view
@@ -1061,10 +1060,17 @@
   ;(log/debug (ex-info "stacktrace" {}) "Updating state after disconnect")
   (log/info "Updating state after disconnect")
   (let [[{:keys [client ping-loop print-loop]} _new-state]
-        (swap-vals! state-atom dissoc
-                    :accepted
-                    :battle :battles :channels :client :client-deferred :last-failed-message
-                    :ping-loop :print-loop :users)]
+        (swap-vals! state-atom
+          (fn [state]
+            (-> state
+                (dissoc :accepted
+                        :battle :battles :channels :client :client-deferred :last-failed-message
+                        :ping-loop :print-loop :users)
+                (update :my-channels
+                  (fn [my-channels]
+                    (->> my-channels
+                         (remove (comp u/battle-channel-name? first))
+                         (into {})))))))]
     (when client
       (client/disconnect client))
     (when ping-loop
@@ -1143,6 +1149,17 @@
     :describe server-cell}})
 
 
+(defmethod event-handler ::toggle
+  [{:fx/keys [event] :as e}]
+  (let [v (boolean (or (:value e) event))
+        inv (not v)]
+    #p [v inv]
+    (swap! *state assoc (:key e) inv)
+    (future
+      (Thread/sleep 100)
+      (swap! *state assoc (:key e) v))))
+
+
 (defn client-buttons
   [{:keys [accepted client client-deferred username password login-error server servers]}]
   {:fx/type :h-box
@@ -1172,7 +1189,7 @@
          :text ""
          :tooltip
          {:fx/type :tooltip
-          :show-delay [10 :ms]
+          ;:show-delay [10 :ms]
           :style {:-fx-font-size 14}
           :text "Cancel connect"}
          :on-action {:event/type ::cancel-connect
@@ -1217,7 +1234,7 @@
         :show-delay [10 :ms]
         :style {:-fx-font-size 14}
         :text "Show server add window"}
-       :on-action {:event/type ::assoc
+       :on-action {:event/type ::toggle
                    :key :show-servers-window}
        :graphic
        {:fx/type font-icon/lifecycle
@@ -1279,6 +1296,26 @@
   [{:keys [server-url server-data]}]
   (swap! *state update-in [:servers server-url] merge server-data))
 
+
+; https://github.com/cljfx/cljfx/issues/94#issuecomment-691708477
+
+
+(defn focus-when-on-scene! [^Node node]
+  (if (some? (.getScene node))
+    (.requestFocus node)
+    (.addListener (.sceneProperty node)
+                  (reify ChangeListener
+                    (changed [this _ _ new-scene]
+                      (when (some? new-scene)
+                        (.removeListener (.sceneProperty node) this)
+                        (.requestFocus node)))))))
+
+(defn ext-focused-by-default [{:keys [desc]}]
+  {:fx/type fx/ext-on-instance-lifecycle
+   :on-created focus-when-on-scene!
+   :desc desc})
+
+
 (defn servers-window
   [{:keys [show-servers-window server-host server-port server-alias servers]}]
   (let [port (if (string/blank? server-port) default-server-port server-port)
@@ -1295,53 +1332,55 @@
      {:fx/type :scene
       :stylesheets stylesheets
       :root
-      {:fx/type :v-box
-       :style {:-fx-font-size 16}
-       :children
-       [
-        {:fx/type :h-box
-         :alignment :center-left
-         :children
-         [{:fx/type :label
-           :alignment :center
-           :text " Host: "}
-          {:fx/type :text-field
-           :text server-host
-           :on-text-changed {:event/type ::assoc
-                             :key :server-host}}]}
-        {:fx/type :h-box
-         :alignment :center-left
-         :children
-         [{:fx/type :label
-           :alignment :center
-           :text " Port: "}
-          {:fx/type :text-field
-           :text server-port
-           :prompt-text "8200"
-           :on-text-changed {:event/type ::assoc
-                             :key :server-port}}]}
-        {:fx/type :h-box
-         :alignment :center-left
-         :children
-         [{:fx/type :label
-           :alignment :center
-           :text " Alias: "}
-          {:fx/type :text-field
-           :text server-alias
-           :on-text-changed {:event/type ::assoc
-                             :key :server-alias}}]}
-        {:fx/type :button
-         :text (str
-                 (if (contains? servers server-url) "Update" "Add")
-                 " server")
-         :style {:-fx-font-size 20}
-         :disable (string/blank? server-host)
-         :on-action {:event/type ::update-server
-                     :server-url server-url
-                     :server-data
-                     {:port port
-                      :host server-host
-                      :alias server-alias}}}]}}}))
+      {:fx/type ext-focused-by-default
+       :desc
+       {:fx/type :v-box
+        :style {:-fx-font-size 16}
+        :children
+        [
+         {:fx/type :h-box
+          :alignment :center-left
+          :children
+          [{:fx/type :label
+            :alignment :center
+            :text " Host: "}
+           {:fx/type :text-field
+            :text server-host
+            :on-text-changed {:event/type ::assoc
+                              :key :server-host}}]}
+         {:fx/type :h-box
+          :alignment :center-left
+          :children
+          [{:fx/type :label
+            :alignment :center
+            :text " Port: "}
+           {:fx/type :text-field
+            :text server-port
+            :prompt-text "8200"
+            :on-text-changed {:event/type ::assoc
+                              :key :server-port}}]}
+         {:fx/type :h-box
+          :alignment :center-left
+          :children
+          [{:fx/type :label
+            :alignment :center
+            :text " Alias: "}
+           {:fx/type :text-field
+            :text server-alias
+            :on-text-changed {:event/type ::assoc
+                              :key :server-alias}}]}
+         {:fx/type :button
+          :text (str
+                  (if (contains? servers server-url) "Update" "Add")
+                  " server")
+          :style {:-fx-font-size 20}
+          :disable (string/blank? server-host)
+          :on-action {:event/type ::update-server
+                      :server-url server-url
+                      :server-data
+                      {:port port
+                       :host server-host
+                       :alias server-alias}}}]}}}}))
 
 (defn register-window
   [{:keys [email password password-confirm register-response server servers show-register-window username]}]
@@ -1643,6 +1682,7 @@
   (future
     (try
       (message/send-message client "LEAVEBATTLE")
+      (swap! *state dissoc :battle)
       (catch Exception e
         (log/error e "Error leaving battle")))))
 
@@ -1729,13 +1769,13 @@
            :on-key-pressed {:event/type ::maps-key-pressed}
            :on-hidden {:event/type ::maps-hidden}
            :tooltip {:fx/type :tooltip
-                     :show-delay [10 :ms]
+                     ;:show-delay [10 :ms]
                      :text (or map-input-prefix "Choose map")}}]))
      [{:fx/type :button
        :text ""
        :tooltip
        {:fx/type :tooltip
-        :show-delay [10 :ms]
+        ;:show-delay [10 :ms]
         :style {:-fx-font-size 14}
         :text "Show maps window"}
        :on-action {:event/type ::show-maps-window
@@ -1747,7 +1787,7 @@
        :props
        {:tooltip
         {:fx/type :tooltip
-         :show-delay [10 :ms]
+         ;:show-delay [10 :ms]
          :text "Open maps directory"}}
        :desc
        {:fx/type :button
@@ -1761,7 +1801,7 @@
          :props
          {:tooltip
           {:fx/type :tooltip
-           :show-delay [10 :ms]
+           ;:show-delay [10 :ms]
            :text "Random map"}}
          :desc
          {:fx/type :button
@@ -1777,7 +1817,7 @@
        :props
        {:tooltip
         {:fx/type :tooltip
-         :show-delay [10 :ms]
+         ;:show-delay [10 :ms]
          :text "Reload maps"}}
        :desc
        {:fx/type :button
@@ -1809,6 +1849,11 @@
     (let [desktop (Desktop/getDesktop)]
       (.browseFileDirectory desktop file))))
 
+(defmethod event-handler ::desktop-browse-url
+  [{:keys [url]}]
+  (let [desktop (Desktop/getDesktop)]
+    (.browse desktop (java.net.URI. url))))
+
 (defn battles-buttons
   [{:keys [accepted battle battles battle-password battle-title client engine-version mod-name map-name maps
            engines mods map-input-prefix engine-filter mod-filter pop-out-battle selected-battle
@@ -1827,7 +1872,7 @@
        :props
        {:tooltip
         {:fx/type :tooltip
-         :show-delay [10 :ms]
+         ;:show-delay [10 :ms]
          :text "Import local resources from SpringLobby and Beyond All Reason"}}
        :desc
        {:fx/type :button
@@ -1841,7 +1886,7 @@
        :props
        {:tooltip
         {:fx/type :tooltip
-         :show-delay [10 :ms]
+         ;:show-delay [10 :ms]
          :text "Download resources from various websites using http"}}
        :desc
        {:fx/type :button
@@ -1855,7 +1900,7 @@
        :props
        {:tooltip
         {:fx/type :tooltip
-         :show-delay [10 :ms]
+         ;:show-delay [10 :ms]
          :text "Download resources with the Rapid tool"}}
        :desc
        {:fx/type :button
@@ -1895,13 +1940,13 @@
                :on-key-pressed {:event/type ::engines-key-pressed}
                :on-hidden {:event/type ::engines-hidden}
                :tooltip {:fx/type :tooltip
-                         :show-delay [10 :ms]
+                         ;:show-delay [10 :ms]
                          :text (or engine-filter "Choose engine")}}]))
          [{:fx/type fx.ext.node/with-tooltip-props
            :props
            {:tooltip
             {:fx/type :tooltip
-             :show-delay [10 :ms]
+             ;:show-delay [10 :ms]
              :text "Open engine directory"}}
            :desc
            {:fx/type :button
@@ -1914,7 +1959,7 @@
            :props
            {:tooltip
             {:fx/type :tooltip
-             :show-delay [10 :ms]
+             ;:show-delay [10 :ms]
              :text "Reload engines"}}
            :desc
            {:fx/type :button
@@ -1953,13 +1998,13 @@
                :on-key-pressed {:event/type ::mods-key-pressed}
                :on-hidden {:event/type ::mods-hidden}
                :tooltip {:fx/type :tooltip
-                         :show-delay [10 :ms]
+                         ;:show-delay [10 :ms]
                          :text (or mod-filter "Choose game")}}]))
          [{:fx/type fx.ext.node/with-tooltip-props
            :props
            {:tooltip
             {:fx/type :tooltip
-             :show-delay [10 :ms]
+             ;:show-delay [10 :ms]
              :text "Open games directory"}}
            :desc
            {:fx/type :button
@@ -1972,7 +2017,7 @@
            :props
            {:tooltip
             {:fx/type :tooltip
-             :show-delay [10 :ms]
+             ;:show-delay [10 :ms]
              :text "Reload games"}}
            :desc
            {:fx/type :button
@@ -2034,7 +2079,7 @@
              :props
              {:tooltip
               {:fx/type :tooltip
-               :show-delay [10 :ms]
+               ;:show-delay [10 :ms]
                :style {:-fx-font-size 14}
                :text "If using git, set version to $VERSION so SpringLobby is happier"}}
              :desc
@@ -2386,7 +2431,7 @@
                :on-action refresh-action
                :tooltip
                {:fx/type :tooltip
-                :show-delay [10 :ms]
+                ;:show-delay [10 :ms]
                 :style {:-fx-font-size 14}
                 :text "Force refresh this resource"}
                :h-box/margin 4
@@ -2402,7 +2447,7 @@
                :on-action delete-action
                :tooltip
                {:fx/type :tooltip
-                :show-delay [10 :ms]
+                ;:show-delay [10 :ms]
                 :style {:-fx-font-size 14}
                 :text "Delete this resource"}
                :h-box/margin 4
@@ -2418,7 +2463,7 @@
                :on-action browse-action
                :tooltip
                {:fx/type :tooltip
-                :show-delay [10 :ms]
+                ;:show-delay [10 :ms]
                 :style {:-fx-font-size 14}
                 :text "Browse this resource"}
                :h-box/margin 4
@@ -2440,7 +2485,7 @@
               (when tooltip
                 {:tooltip
                  {:fx/type :tooltip
-                  :show-delay [10 :ms]
+                  ;:show-delay [10 :ms]
                   :style {:-fx-font-size 14}
                   :text tooltip}})
               :desc
@@ -2486,8 +2531,11 @@
                  filename (io/file (fs/download-dir) "engine" filename)
                  resource-name (http/engine-download-file resource-name)
                  :else nil)
-      ::mod (when filename (io/file (fs/mod-file filename))) ; TODO mod format types
-      ::map (when filename (io/file (fs/map-file filename))) ; TODO mod format types
+      ::mod (when filename
+              (if (string/ends-with? filename ".sdp")
+                (rapid/sdp-file filename)
+                (fs/mod-file filename)))
+      ::map (when filename (io/file (fs/map-file filename)))
       nil)))
 
 (defmethod task-handler ::import [{:keys [importable]}]
@@ -2497,7 +2545,9 @@
     (update-copying source {:status true})
     (update-copying dest {:status true})
     (try
-      (fs/copy source dest)
+      (if (string/ends-with? (fs/filename source) ".sdp")
+        (rapid/copy-package source (fs/parent-file (fs/parent-file dest)))
+        (fs/copy source dest))
       (log/info "Finished importing" importable "from" source "to" dest)
       (case (:resource-type importable)
         ::map (force-update-battle-map *state)
@@ -2833,7 +2883,7 @@
          {:fx/type ext-recreate-on-key-changed
           :key (nickname i)
           :desc
-          {:fx/type :choice-box
+          {:fx/type :combo-box
            :value (->> i :battle-status :side (get (spring/sides battle-modname)) str)
            :on-value-changed {:event/type ::battle-side-changed
                               :client client
@@ -2890,7 +2940,7 @@
          {:fx/type ext-recreate-on-key-changed
           :key (nickname i)
           :desc
-          {:fx/type :choice-box
+          {:fx/type :combo-box
            :value (str (:id (:battle-status i)))
            :on-value-changed {:event/type ::battle-team-changed
                               :client client
@@ -2913,7 +2963,7 @@
          {:fx/type ext-recreate-on-key-changed
           :key (nickname i)
           :desc
-          {:fx/type :choice-box
+          {:fx/type :combo-box
            :value (str (:ally (:battle-status i)))
            :on-value-changed {:event/type ::battle-ally-changed
                               :client client
@@ -3167,7 +3217,7 @@
                [
                 {:fx/type :label
                  :text " AI: "}
-                {:fx/type :choice-box
+                {:fx/type :combo-box
                  :value bot-name
                  :disable (empty? bot-names)
                  :on-value-changed {:event/type ::change-bot-name
@@ -3179,7 +3229,7 @@
                [
                 {:fx/type :label
                  :text " Version: "}
-                {:fx/type :choice-box
+                {:fx/type :combo-box
                  :value bot-version
                  :disable (string/blank? bot-name)
                  :on-value-changed {:event/type ::change-bot-version}
@@ -3199,7 +3249,7 @@
              :children
              [{:fx/type :label
                :text " Isolation: "}
-              {:fx/type :choice-box
+              {:fx/type :combo-box
                :value (name (or isolation-type :engine))
                :items (map name [:engine :shared])
                :on-value-changed {:event/type ::isolation-type-change}}]}
@@ -3446,7 +3496,7 @@
                    (let [downloadable (->> downloadables-by-url
                                            vals
                                            (filter (comp #{::engine} :resource-type))
-                                           (filter (partial could-be-this-engine? engine-version))
+                                           (filter (comp (partial could-be-this-engine? engine-version) :resource-filename))
                                            first)
                          url (:download-url downloadable)
                          download (get http-download url)
@@ -3529,7 +3579,7 @@
                  :props
                  {:tooltip
                   {:fx/type :tooltip
-                   :show-delay [10 :ms]
+                   ;:show-delay [10 :ms]
                    :style {:-fx-font-size 12}
                    :text (cond
                            am-host "You are the host, start battle for everyone"
@@ -3588,7 +3638,7 @@
                     :props
                     {:tooltip
                      {:fx/type :tooltip
-                      :show-delay [10 :ms]
+                      ;:show-delay [10 :ms]
                       :text (str (:name i) "\n\n" (:desc i))}}
                     :desc
                     (merge
@@ -3617,7 +3667,7 @@
                          :props
                          {:tooltip
                           {:fx/type :tooltip
-                           :show-delay [10 :ms]
+                           ;:show-delay [10 :ms]
                            :text (str (:name i) "\n\n" (:desc i))}}
                          :desc
                          {:fx/type :check-box
@@ -3635,7 +3685,7 @@
                          :props
                          {:tooltip
                           {:fx/type :tooltip
-                           :show-delay [10 :ms]
+                           ;:show-delay [10 :ms]
                            :text (str (:name i) "\n\n" (:desc i))}}
                          :desc
                          {:fx/type :text-field
@@ -3656,10 +3706,10 @@
                          :props
                          {:tooltip
                           {:fx/type :tooltip
-                           :show-delay [10 :ms]
+                           ;:show-delay [10 :ms]
                            :text (str (:name i) "\n\n" (:desc i))}}
                          :desc
-                         {:fx/type :choice-box
+                         {:fx/type :combo-box
                           :disable (not am-host)
                           :value (or v (:def i))
                           :on-value-changed {:event/type ::modoption-change
@@ -3679,7 +3729,7 @@
              :v-box/vgrow :always}]}]}]}
       {:fx/type :v-box
        :alignment :top-left
-       :style {:-fx-min-height (+ minimap-size 100)}
+       :style {:-fx-min-height (+ minimap-size 120)}
        :children
        [
         {:fx/type :stack-pane
@@ -3809,7 +3859,7 @@
              [{:fx/type :label
                :alignment :center-left
                :text " Start Positions: "}
-              {:fx/type :choice-box
+              {:fx/type :combo-box
                :value startpostype
                :items (map str (vals spring/startpostypes))
                :disable (not am-host)
@@ -3993,6 +4043,14 @@
                               first))
         root (fs/isolation-dir)]
     (if (and engine-details (:file engine-details))
+      (do
+        (log/info "Initializing rapid by calling download")
+        (deref
+          (event-handler
+            {:event/type ::rapid-download
+             :rapid-id "engine:stable" ; TODO how else to init rapid without download...
+             :engine-file (:file engine-details)})))
+      #_
       (if-not (and (fs/exists (io/file root "rapid"))
                    (fs/exists (io/file root "rapid" "packages.springrts.com" "versions.gz")))
         (do
@@ -4274,6 +4332,7 @@
     :resources-fn http/crawl-springrts-engine-downloadables}
    {:download-source-name "BAR GitHub spring"
     :url http/bar-spring-releases-url
+    :browse-url "https://github.com/beyond-all-reason/spring/releases"
     :resources-fn http/get-github-release-engine-downloadables}])
 
 
@@ -4334,6 +4393,12 @@
     (add-task! *state (merge
                         {::task-type ::scan-imports}
                         import-source))))
+
+(defmethod event-handler ::print-mod-name
+  [{:keys [importable]}]
+  (let [{:keys [resource-file]} importable]
+    #p resource-file
+    #p (:mod-name (read-mod-data resource-file))))
 
 
 (defn import-window
@@ -4408,14 +4473,14 @@
               :describe import-source-cell}
              :on-value-changed {:event/type ::import-source-change}
              :tooltip {:fx/type :tooltip
-                       :show-delay [10 :ms]
+                       ;:show-delay [10 :ms]
                        :text "Choose import source"}}]
            (when import-source
              [{:fx/type fx.ext.node/with-tooltip-props
                :props
                {:tooltip
                 {:fx/type :tooltip
-                 :show-delay [10 :ms]
+                 ;:show-delay [10 :ms]
                  :text "Clear source filter"}}
                :desc
                {:fx/type :button
@@ -4428,7 +4493,7 @@
                :props
                {:tooltip
                 {:fx/type :tooltip
-                 :show-delay [10 :ms]
+                 ;:show-delay [10 :ms]
                  :text "Open import source directory"}}
                :desc
                {:fx/type :button
@@ -4441,7 +4506,7 @@
              :props
              {:tooltip
               {:fx/type :tooltip
-               :show-delay [10 :ms]
+               ;:show-delay [10 :ms]
                :style {:-fx-font-size 14}
                :text "Hide downloadables not discovered in the last polling cycle, default 24h"}}
              :desc
@@ -4472,7 +4537,7 @@
                :props
                {:tooltip
                 {:fx/type :tooltip
-                 :show-delay [10 :ms]
+                 ;:show-delay [10 :ms]
                  :text "Clear filter"}}
                :desc
                {:fx/type :button
@@ -4494,14 +4559,14 @@
              :on-value-changed {:event/type ::assoc
                                 :key :import-type}
              :tooltip {:fx/type :tooltip
-                       :show-delay [10 :ms]
+                       ;:show-delay [10 :ms]
                        :text "Choose import type"}}]
            (when import-type
              [{:fx/type fx.ext.node/with-tooltip-props
                :props
                {:tooltip
                 {:fx/type :tooltip
-                 :show-delay [10 :ms]
+                 ;:show-delay [10 :ms]
                  :text "Clear type filter"}}
                :desc
                {:fx/type :button
@@ -4538,11 +4603,37 @@
            {:fx/cell-type :table-cell
             :describe (comp import-type-cell :resource-type)}}
           {:fx/type :table-column
+           :text "Filename"
+           :cell-value-factory identity
+           :cell-factory
+           {:fx/cell-type :table-cell
+            :describe (fn [i] {:text (str (:resource-filename i))})}}
+          {:fx/type :table-column
            :text "Path"
            :cell-value-factory identity
            :cell-factory
            {:fx/cell-type :table-cell
             :describe (fn [i] {:text (str (:resource-file i))})}}
+          {:fx/type :table-column
+           :text "Detail"
+           :cell-value-factory identity
+           :cell-factory
+           {:fx/cell-type :table-cell
+            :describe
+            (fn [importable]
+              {:text ""
+               :graphic
+               {:fx/type :button
+                :text "get details"
+                :tooltip
+                {:fx/type :tooltip
+                 ;:show-delay [10 :ms]
+                 :text (str "Read package details")}
+                :on-action {:event/type ::print-mod-name
+                            :importable importable}
+                :graphic
+                {:fx/type font-icon/lifecycle
+                 :icon-literal "mdi-content-copy:16:white"}}})}}
           {:fx/type :table-column
            :text "Import"
            :cell-value-factory identity
@@ -4570,7 +4661,7 @@
                     :disable in-progress
                     :tooltip
                     {:fx/type :tooltip
-                     :show-delay [10 :ms]
+                     ;:show-delay [10 :ms]
                      :text (str "Copy to " dest-path)}
                     :on-action {:event/type ::add-task
                                 :task
@@ -4660,14 +4751,14 @@
               :describe download-source-cell}
              :on-value-changed {:event/type ::download-source-change}
              :tooltip {:fx/type :tooltip
-                       :show-delay [10 :ms]
+                       ;:show-delay [10 :ms]
                        :text "Choose download source"}}]
            (when download-source
              [{:fx/type fx.ext.node/with-tooltip-props
                :props
                {:tooltip
                 {:fx/type :tooltip
-                 :show-delay [10 :ms]
+                 ;:show-delay [10 :ms]
                  :text "Clear source filter"}}
                :desc
                {:fx/type :button
@@ -4680,20 +4771,28 @@
                :props
                {:tooltip
                 {:fx/type :tooltip
-                 :show-delay [10 :ms]
+                 ;:show-delay [10 :ms]
                  :text "Open download source url"}}
                :desc
                {:fx/type :button
-                :on-action {:event/type ::desktop-open-url
-                            :url (:url download-source)}
+                :on-action {:event/type ::desktop-browse-url
+                            :url (or (:browse-url download-source)
+                                     (:url download-source))}
                 :graphic
                 {:fx/type font-icon/lifecycle
                  :icon-literal "mdi-web:16:white"}}}])
-           [{:fx/type fx.ext.node/with-tooltip-props
+           [{:fx/type :button
+             :text " Reload "
+             :on-action {:event/type ::add-task
+                         :task {::task-type ::update-downloadables}}
+             :graphic
+             {:fx/type font-icon/lifecycle
+              :icon-literal "mdi-refresh:16:white"}}
+            {:fx/type fx.ext.node/with-tooltip-props
              :props
              {:tooltip
               {:fx/type :tooltip
-               :show-delay [10 :ms]
+               ;:show-delay [10 :ms]
                :style {:-fx-font-size 14}
                :text "Hide downloadables not discovered in the last polling cycle, default 24h"}}
              :desc
@@ -4724,7 +4823,7 @@
                :props
                {:tooltip
                 {:fx/type :tooltip
-                 :show-delay [10 :ms]
+                 ;:show-delay [10 :ms]
                  :text "Clear filter"}}
                :desc
                {:fx/type :button
@@ -4746,14 +4845,14 @@
              :on-value-changed {:event/type ::assoc
                                 :key :download-type}
              :tooltip {:fx/type :tooltip
-                       :show-delay [10 :ms]
+                       ;:show-delay [10 :ms]
                        :text "Choose download type"}}]
            (when download-type
              [{:fx/type fx.ext.node/with-tooltip-props
                :props
                {:tooltip
                 {:fx/type :tooltip
-                 :show-delay [10 :ms]
+                 ;:show-delay [10 :ms]
                  :text "Clear type filter"}}
                :desc
                {:fx/type :button
@@ -4825,7 +4924,7 @@
                    {:fx/type :button
                     :tooltip
                     {:fx/type :tooltip
-                     :show-delay [10 :ms]
+                     ;:show-delay [10 :ms]
                      :text (str "Download to " dest-path)}
                     :on-action {:event/type ::http-downloadable
                                 :downloadable downloadable}
@@ -4843,7 +4942,7 @@
                    {:fx/type :button
                     :tooltip
                     {:fx/type :tooltip
-                     :show-delay [10 :ms]
+                     ;:show-delay [10 :ms]
                      :text (str "Extract to " extract-file)}
                     :on-action
                     {:event/type ::extract-7z
@@ -4861,7 +4960,20 @@
   [{:keys [engine-version engines rapid-download rapid-filter rapid-repo rapid-repos rapid-versions
            rapid-data-by-hash sdp-files show-rapid-downloader]}]
   (let [sdp-files (or sdp-files [])
-        sdp-hashes (set (map rapid/sdp-hash sdp-files))]
+        sdp-hashes (set (map rapid/sdp-hash sdp-files))
+        packages (->> sdp-files
+                      (filter some?)
+                      (map
+                        (fn [f]
+                          (let [rapid-data
+                                (->> f
+                                     rapid/sdp-hash
+                                     (get rapid-data-by-hash))]
+                            {:id (->> rapid-data :id str)
+                             :filename (-> f fs/filename str)
+                             :version (->> rapid-data :version str)})))
+                      (sort-by :version version/version-compare)
+                      reverse)]
     {:fx/type :stage
      :showing show-rapid-downloader
      :title "alt-spring-lobby Rapid Downloader"
@@ -4882,13 +4994,22 @@
          :children
          [{:fx/type :label
            :text " Engine for pr-downloader: "}
-          {:fx/type :choice-box
+          {:fx/type :combo-box
            :value (str engine-version)
-           :items (or (->> engines
-                           (map :engine-version)
-                           sort)
-                      [])
-           :on-value-changed {:event/type ::version-change}}]}
+           :items
+           (or (->> engines
+                    (map :engine-version)
+                    sort
+                    seq)
+               [])
+           :on-value-changed {:event/type ::version-change}}
+          {:fx/type :button
+           :text " Reload "
+           :on-action {:event/type ::add-task
+                       :task {::task-type ::update-rapid}}
+           :graphic
+           {:fx/type font-icon/lifecycle
+            :icon-literal "mdi-refresh:16:white"}}]}
         {:fx/type :h-box
          :style {:-fx-font-size 16}
          :alignment :center-left
@@ -4896,7 +5017,7 @@
          (concat
            [{:fx/type :label
              :text " Filter Repo: "}
-            {:fx/type :choice-box
+            {:fx/type :combo-box
              :value (str rapid-repo)
              :items (or rapid-repos [])
              :on-value-changed {:event/type ::rapid-repo-change}}]
@@ -4905,7 +5026,7 @@
                :props
                {:tooltip
                 {:fx/type :tooltip
-                 :show-delay [10 :ms]
+                 ;:show-delay [10 :ms]
                  :text "Clear rapid repo filter"}}
                :desc
                {:fx/type :button
@@ -4926,7 +5047,7 @@
                :props
                {:tooltip
                 {:fx/type :tooltip
-                 :show-delay [10 :ms]
+                 ;:show-delay [10 :ms]
                  :text "Clear filter"}}
                :desc
                {:fx/type :button
@@ -4953,7 +5074,10 @@
                                  (string/includes?
                                    (:hash i)
                                    (string/lower-case rapid-filter)))
-                               true))))
+                               true)))
+                         (filter :version)
+                         (sort-by :version version/version-compare)
+                         reverse)
                     [])
          :columns
          [{:fx/type :table-column
@@ -5019,7 +5143,7 @@
            :props
            {:tooltip
             {:fx/type :tooltip
-             :show-delay [10 :ms]
+             ;:show-delay [10 :ms]
              :text "Open rapid packages directory"}}
            :desc
            {:fx/type :button
@@ -5030,7 +5154,7 @@
              :icon-literal "mdi-folder:16:white"}}}]}
         {:fx/type :table-view
          :column-resize-policy :constrained ; TODO auto resize
-         :items sdp-files
+         :items packages
          :columns
          [{:fx/type :table-column
            :text "Filename"
@@ -5038,32 +5162,22 @@
            :cell-factory
            {:fx/cell-type :table-cell
             :describe
-            (fn [i]
-              {:text (-> i fs/filename str)})}}
+            (fn [i] {:text (:filename i)})}}
           {:fx/type :table-column
            :text "ID"
            :cell-value-factory identity
            :cell-factory
            {:fx/cell-type :table-cell
             :describe
-            (fn [i]
-              {:text (->> i
-                          rapid/sdp-hash
-                          (get rapid-data-by-hash)
-                          :id
-                          str)})}}
+            (fn [i] {:text (:id i)})}}
           {:fx/type :table-column
            :text "Version"
            :cell-value-factory identity
            :cell-factory
            {:fx/cell-type :table-cell
             :describe
-            (fn [i]
-              {:text (->> i
-                          rapid/sdp-hash
-                          (get rapid-data-by-hash)
-                          :version
-                          str)})}}]}]}}}))
+            (fn [i] {:text (:version i)})}}]}]}}}))
+
 
 (defmethod event-handler ::watch-replay
   [{:keys [engine-version engines replay-file]}]
@@ -5086,7 +5200,7 @@
 
 
 (defn replays-window
-  [{:keys [engines show-replays]}]
+  [{:keys [downloadables-by-url engines show-replays]}]
   (let [replay-files (fs/replay-files) ; TODO FIXME IO IN RENDER
         replays (->> replay-files
                      (map
@@ -5164,18 +5278,34 @@
            {:fx/cell-type :table-cell
             :describe
             (fn [i]
-              {:text ""
-               :graphic
-               {:fx/type :button
-                :text " Watch"
-                :on-action
-                {:event/type ::watch-replay
-                 :replay-file (:file i)
-                 :engines engines
-                 :engine-version (-> i :parsed-filename :engine-version)}
-                :graphic
-                {:fx/type font-icon/lifecycle
-                 :icon-literal "mdi-movie:16:white"}}})}}]}]}}}))
+              (let [downloadables (vals downloadables-by-url)
+                    engine-version (-> i :parsed-filename :engine-version)
+                    engine-downloads (->> downloadables
+                                          (filter (comp #{::engine} :resource-type)))
+                    matching-downloads (when engine-version
+                                         (->> engine-downloads
+                                              (filter :resource-name)
+                                              (filter (comp (partial could-be-this-engine? engine-version) :resource-name))))]
+                {:text ""
+                 :graphic
+                 (cond
+                   (some (comp #{engine-version} :engine-version) engines)
+                   {:fx/type :button
+                    :text " Watch"
+                    :on-action
+                    {:event/type ::watch-replay
+                     :replay-file (:file i)
+                     :engines engines
+                     :engine-version (-> i :parsed-filename :engine-version)}
+                    :graphic
+                    {:fx/type font-icon/lifecycle
+                     :icon-literal "mdi-movie:16:white"}}
+                   (seq matching-downloads)
+                   {:fx/type :label
+                    :text " Download engine"}
+                   :else
+                   {:fx/type :label
+                    :text " No engine"})}))}}]}]}}}))
 
 (defn maps-window
   [{:keys [filter-maps-name maps on-change-map show-maps]}]
@@ -5210,7 +5340,7 @@
              :props
              {:tooltip
               {:fx/type :tooltip
-               :show-delay [10 :ms]
+               ;:show-delay [10 :ms]
                :text "Clear filter"}}
              :desc
              {:fx/type :button
@@ -5328,7 +5458,7 @@
           :graphic {:fx/type :label
                     :text (str channel-name)}
           :id channel-name
-          :closable (not (battle-channel-name? channel-name))
+          :closable (not (u/battle-channel-name? channel-name))
           :on-close-request {:event/type ::leave-channel
                              :channel-name channel-name
                              :client client}
@@ -5556,13 +5686,13 @@
        [(merge
           {:fx/type rapid-download-window}
           (select-keys state
-            [:engine-version :engines :rapid-download :rapid-filter :rapid-repo :rapid-repos :rapid-versions
-             :rapid-data-by-hash :sdp-files :show-rapid-downloader]))])
+            [:engine-version :engines :rapid-data-by-hash :rapid-download :rapid-filter :rapid-repo
+             :rapid-repos :rapid-versions :sdp-files :show-rapid-downloader]))])
      (when show-replays
        [(merge
           {:fx/type replays-window}
           (select-keys state
-            [:engines :show-replays]))])
+            [:downloadables-by-url :engines :show-replays]))])
      (when show-servers-window
        [(merge
           {:fx/type servers-window}

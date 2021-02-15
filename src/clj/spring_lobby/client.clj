@@ -323,7 +323,7 @@
     (message/send-message client "CHANNELS")
     (doseq [channel my-channels]
       (let [[channel-name {channel-server :server}] channel]
-        (when (= server channel-server)
+        (when (and (= server channel-server)) (not (u/battle-channel-name? channel-name))
           (message/send-message client (str "JOIN " channel-name)))))
     (ping-loop state-atom client)))
 
